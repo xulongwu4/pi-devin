@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const root = mkdtempSync(join(tmpdir(), "pi-devin-cache-"));
-const cacheHome = join(root, "cache");
+const agentDir = join(root, "agent");
 const fakeCli = join(root, "devin");
 const catalog = {
   families: [
@@ -29,11 +29,11 @@ console.log(${JSON.stringify(JSON.stringify(catalog))});
 `,
 );
 chmodSync(fakeCli, 0o755);
-process.env.XDG_CACHE_HOME = cacheHome;
+process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.DEVIN_CLI = fakeCli;
 
 const { loadCliCatalog } = await import("../.test-dist/src/models.js");
-const cachePath = join(cacheHome, "pi-devin", "models.json");
+const cachePath = join(agentDir, "devin", "models.json");
 
 test("uses the cached catalog when the Devin CLI is unavailable", async () => {
   try {

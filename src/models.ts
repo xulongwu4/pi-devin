@@ -30,8 +30,8 @@ export interface DevinCatalog {
 
 const THINKING_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const CATALOG_CACHE_PATH = join(
-  process.env.XDG_CACHE_HOME || join(homedir(), ".cache"),
-  "pi-devin",
+  process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
+  "devin",
   "models.json",
 );
 
