@@ -21,7 +21,7 @@ src/context-map.ts    # Pi Context → Cognition chat history
 
 - `/login devin` must call `devin auth login` when Pi credentials are missing, then persist through Pi's native OAuth credential store.
 - Runtime auth must come from Pi's resolved `auth.json` credential, never `credentials.toml`.
-- `models.json` `providers.devin.baseUrl` must compose above the native provider and route catalog plus inference.
+- `models.json` `providers.devin.baseUrl` must compose above the native provider for inference only; catalog fetch always uses `https://server.codeium.com`.
 - Model IDs must come from `GetCliModelConfigs`, not a hardcoded cloud allowlist.
 - Catalog transport/decode failures must fall back to `$PI_CODING_AGENT_DIR/devin/models.json`.
 - Do not depend on Zed or ACP. Pi keeps tools, permissions, and the session tree.

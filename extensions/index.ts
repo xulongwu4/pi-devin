@@ -1,6 +1,4 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { getAgentDir, type ExtensionAPI, type ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { createProvider, type Model, type OAuthCredential } from "@earendil-works/pi-ai";
 import { loginWithCli } from "../src/credentials.js";
 import { whichDevin, devinVersion } from "../src/cli.js";
@@ -13,19 +11,6 @@ const PROVIDER_ID = "devin";
 const API_IDENTIFIER = "devin-local" as const;
 const DEFAULT_BASE_URL = "https://server.codeium.com";
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
-
-function configuredBaseUrl(): string {
-  try {
-    const config = JSON.parse(readFileSync(join(getAgentDir(), "models.json"), "utf8")) as {
-      providers?: Record<string, { baseUrl?: unknown }>;
-    };
-    const value = config.providers?.[PROVIDER_ID]?.baseUrl;
-    if (typeof value === "string" && value.trim()) return value.replace(/\/$/, "");
-  } catch {
-    // Pi reports malformed models.json separately; retain the provider default.
-  }
-  return DEFAULT_BASE_URL;
-}
 
 function materializeModels(models: ProviderModelConfig[]): Model<typeof API_IDENTIFIER>[] {
   return models.map((model) => ({
@@ -75,7 +60,7 @@ function createDevinProvider() {
       if (credential?.type !== "oauth" || !credential.access) return [];
       const catalog = await loadCatalog({
         apiKey: credential.access,
-        apiServerUrl: configuredBaseUrl(),
+        apiServerUrl: DEFAULT_BASE_URL,
         signal: context.signal,
       });
       return materializeModels(modelsFromCatalog(catalog));
