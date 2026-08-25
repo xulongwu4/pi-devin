@@ -12,12 +12,12 @@ Pi stays the harness. The [Devin CLI](https://docs.devin.ai/cli) is used for fir
 This model is only in Devin Local.
 ```
 
-Those models are available through Devin Local. This package reuses the CLI credential after first login, then fetches the Local catalog and streams completions directly so Pi's tools, sessions, and UI stay in charge.
+Those models are available through Devin Local. On first login this package imports the CLI credential into Pi's `auth.json`; catalog discovery and inference then use Pi's stored credential directly so Pi's tools, sessions, and UI stay in charge.
 
 ## Requirements
 
 - Pi Coding Agent 0.80+
-- The [Devin CLI](https://docs.devin.ai/cli) for first login, or an existing `~/.local/share/devin/credentials.toml`
+- The [Devin CLI](https://docs.devin.ai/cli) for first login, or an existing `devin` entry in Pi's `auth.json`
 - Node 18+
 
 For first login, the CLI binary is resolved in this order:
@@ -58,11 +58,23 @@ Restart Pi or run `/reload`.
 /model devin/gpt-5-6-sol-high
 ```
 
-`/login devin` runs `devin auth login` if `~/.local/share/devin/credentials.toml` is missing. If you already signed in through the Devin CLI or Devin Desktop, that file is reused.
+`/login devin` runs `devin auth login` when needed, then stores the resulting API key under `devin` in Pi's `auth.json`. After that succeeds, inference and catalog refresh do not read `credentials.toml`, so the file and CLI may be removed.
+
+Override the API server for both catalog and inference in Pi's `models.json`:
+
+```json
+{
+  "providers": {
+    "devin": {
+      "baseUrl": "http://127.0.0.1:8787/route_to/https://server.codeium.com"
+    }
+  }
+}
+```
 
 Commands:
 
-- `/devin-status` — credential and optional CLI status
+- `/devin-status` — Pi auth, effective endpoint, and optional CLI status
 - `/devin-refresh` — fetch the Devin Local model catalog directly
 
 The last successful direct catalog is cached at `$PI_CODING_AGENT_DIR/devin/models.json` (default: `~/.pi/agent/devin/models.json`). Network, timeout, HTTP, or decode failures fall back to that cache; a missing or corrupt cache falls back to the bundled models.
@@ -72,7 +84,7 @@ The last successful direct catalog is cached at `$PI_CODING_AGENT_DIR/devin/mode
 | This package | Not this package |
 |---|---|
 | Pi is the agent | Devin taking over the session |
-| Devin CLI for first login only | Fake Windsurf OAuth paste flow |
+| Pi `auth.json` after CLI-assisted first login | Fake Windsurf OAuth paste flow |
 | Live Devin Local families (Opus 5, Fable 5, Sol, …) | Hardcoded cloud allowlist |
 | Completions streamed into Pi tools | An editor host for Devin |
 
