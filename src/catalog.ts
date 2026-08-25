@@ -56,7 +56,7 @@ function parseCatalog(text: string): DevinCatalog | null {
   return Array.isArray(parsed?.families) ? parsed : null;
 }
 
-function readCachedCatalog(): DevinCatalog | null {
+export function loadCachedCatalog(): DevinCatalog | null {
   try {
     return parseCatalog(readFileSync(CACHE_PATH, "utf8"));
   } catch {
@@ -221,12 +221,12 @@ export async function loadCatalog(options: LoadCatalogOptions): Promise<DevinCat
     const configsBody = await postUnary(MODEL_CONFIGS_PATH, options, timeout.signal);
     const configs = decodeModelConfigs(configsBody);
     if (configs.length === 0) throw new Error("GetCliModelConfigs returned no routable models");
-    const catalog = normalizeCatalog(configs, readCachedCatalog());
+    const catalog = normalizeCatalog(configs, loadCachedCatalog());
     if (catalog.families.length === 0) throw new Error("Devin Local catalog is empty");
     writeCachedCatalog(catalog);
     return catalog;
   } catch (error) {
-    const cached = readCachedCatalog();
+    const cached = loadCachedCatalog();
     if (cached) return cached;
     throw error;
   } finally {

@@ -1,9 +1,11 @@
-import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir, type ExtensionAPI, type ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { createProvider, type Model, type OAuthCredential } from "@earendil-works/pi-ai";
 import { loginWithCli } from "../src/credentials.js";
 import { whichDevin, devinVersion } from "../src/cli.js";
-import { loadCatalog } from "../src/catalog.js";
-import { FALLBACK_MODELS, modelsFromCatalog } from "../src/models.js";
+import { loadCachedCatalog, loadCatalog } from "../src/catalog.js";
+import { modelsFromCatalog } from "../src/models.js";
 import { CLIENT_IDE, CLIENT_VERSION } from "../src/metadata.js";
 import { streamDevin } from "../src/stream.js";
 
@@ -12,7 +14,18 @@ const API_IDENTIFIER = "devin-local" as const;
 const DEFAULT_BASE_URL = "https://server.codeium.com";
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
-let effectiveBaseUrl = DEFAULT_BASE_URL;
+function configuredBaseUrl(): string {
+  try {
+    const config = JSON.parse(readFileSync(join(getAgentDir(), "models.json"), "utf8")) as {
+      providers?: Record<string, { baseUrl?: unknown }>;
+    };
+    const value = config.providers?.[PROVIDER_ID]?.baseUrl;
+    if (typeof value === "string" && value.trim()) return value.replace(/\/$/, "");
+  } catch {
+    // Pi reports malformed models.json separately; retain the provider default.
+  }
+  return DEFAULT_BASE_URL;
+}
 
 function materializeModels(models: ProviderModelConfig[]): Model<typeof API_IDENTIFIER>[] {
   return models.map((model) => ({
@@ -30,18 +43,7 @@ function materializeModels(models: ProviderModelConfig[]): Model<typeof API_IDEN
   }));
 }
 
-async function refreshDevinProvider(
-  pi: ExtensionAPI,
-  apiKey: string,
-  baseUrl: string,
-): Promise<number> {
-  const catalog = await loadCatalog({ apiKey, apiServerUrl: baseUrl });
-  const models = modelsFromCatalog(catalog);
-  pi.registerProvider(createDevinProvider(pi, models));
-  return models.length;
-}
-
-function createDevinProvider(pi: ExtensionAPI, models: ProviderModelConfig[]) {
+function createDevinProvider() {
   return createProvider({
     id: PROVIDER_ID,
     name: "Devin Local",
@@ -52,11 +54,6 @@ function createDevinProvider(pi: ExtensionAPI, models: ProviderModelConfig[]) {
         isSubscription: true,
         async login(): Promise<OAuthCredential> {
           const credentials = await loginWithCli();
-          try {
-            await refreshDevinProvider(pi, credentials.apiKey, effectiveBaseUrl);
-          } catch {
-            // Login remains valid when catalog refresh and cache both fail.
-          }
           return {
             type: "oauth",
             refresh: "",
@@ -72,7 +69,17 @@ function createDevinProvider(pi: ExtensionAPI, models: ProviderModelConfig[]) {
         },
       },
     },
-    models: materializeModels(models),
+    models: materializeModels(modelsFromCatalog(loadCachedCatalog())),
+    async fetchModels(context) {
+      const credential = context.credential;
+      if (credential?.type !== "oauth" || !credential.access) return [];
+      const catalog = await loadCatalog({
+        apiKey: credential.access,
+        apiServerUrl: configuredBaseUrl(),
+        signal: context.signal,
+      });
+      return materializeModels(modelsFromCatalog(catalog));
+    },
     api: {
       stream: streamDevin,
       streamSimple: streamDevin,
@@ -81,16 +88,10 @@ function createDevinProvider(pi: ExtensionAPI, models: ProviderModelConfig[]) {
 }
 
 export default function (pi: ExtensionAPI): void {
-  pi.registerProvider(createDevinProvider(pi, FALLBACK_MODELS));
+  pi.registerProvider(createDevinProvider());
 
   pi.on("session_start", async (_event, ctx) => {
-    effectiveBaseUrl = ctx.modelRegistry.getProvider(PROVIDER_ID)?.baseUrl ?? DEFAULT_BASE_URL;
-    try {
-      const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
-      if (apiKey) await refreshDevinProvider(pi, apiKey, effectiveBaseUrl);
-    } catch {
-      // Keep the provider's current models.
-    }
+    await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID] });
   });
 
   pi.registerCommand("devin-status", {
@@ -118,25 +119,19 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("devin-refresh", {
     description: "Reload the Devin Local model catalog",
     handler: async (_args, ctx) => {
-      try {
-        const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
-        if (!apiKey) {
-          ctx.ui.notify("Devin: not signed in. Run /login devin", "warning");
-          return;
-        }
-        effectiveBaseUrl = ctx.modelRegistry.getProvider(PROVIDER_ID)?.baseUrl ?? DEFAULT_BASE_URL;
-        const count = await refreshDevinProvider(pi, apiKey, effectiveBaseUrl);
-        ctx.ui.notify(`Devin: loaded ${count} families.`, "info");
-      } catch (error) {
-        ctx.ui.notify(
-          `Devin refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-          "error",
-        );
+      const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
+      if (!apiKey) {
+        ctx.ui.notify("Devin: not signed in. Run /login devin", "warning");
+        return;
       }
+      const result = await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], force: true });
+      const error = result.errors.get(PROVIDER_ID);
+      if (error) {
+        ctx.ui.notify(`Devin refresh failed: ${error.message}`, "error");
+        return;
+      }
+      const count = ctx.modelRegistry.getAll().filter((model) => model.provider === PROVIDER_ID).length;
+      ctx.ui.notify(`Devin: loaded ${count} families.`, "info");
     },
-  });
-
-  pi.on("session_shutdown", async () => {
-    effectiveBaseUrl = DEFAULT_BASE_URL;
   });
 }
