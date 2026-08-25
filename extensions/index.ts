@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { Api, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { authStatus, loginWithCli, readCredentials } from "../src/credentials.js";
+import { authStatus, loginWithCli, readCredentials, type DevinCredentials } from "../src/credentials.js";
 import { whichDevin, devinVersion } from "../src/cli.js";
-import { FALLBACK_MODELS, loadCliCatalog, modelsFromCatalog } from "../src/models.js";
+import { loadCatalog } from "../src/catalog.js";
+import { FALLBACK_MODELS, modelsFromCatalog } from "../src/models.js";
 import { CLIENT_IDE, CLIENT_VERSION } from "../src/metadata.js";
 import { streamDevin } from "../src/stream.js";
 
@@ -10,6 +11,16 @@ const PROVIDER_ID = "devin";
 const PLACEHOLDER_BASE_URL = "https://server.codeium.com";
 
 let _pi: ExtensionAPI | null = null;
+
+async function refreshDevinProvider(pi: ExtensionAPI, credentials: DevinCredentials): Promise<number> {
+  const catalog = await loadCatalog({
+    apiKey: credentials.apiKey,
+    apiServerUrl: credentials.apiServerUrl,
+  });
+  const models = modelsFromCatalog(catalog);
+  registerDevinProvider(pi, models);
+  return models.length;
+}
 
 function registerDevinProvider(pi: ExtensionAPI, models: ProviderModelConfig[]): void {
   pi.registerProvider(PROVIDER_ID, {
@@ -23,8 +34,7 @@ function registerDevinProvider(pi: ExtensionAPI, models: ProviderModelConfig[]):
         const creds = await loginWithCli();
         if (_pi) {
           try {
-            const catalog = await loadCliCatalog();
-            registerDevinProvider(_pi, modelsFromCatalog(catalog));
+            await refreshDevinProvider(_pi, creds);
           } catch {
             // keep current models
           }
@@ -60,19 +70,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   registerDevinProvider(pi, FALLBACK_MODELS);
 
   try {
-    if (readCredentials()) {
-      const catalog = await loadCliCatalog();
-      registerDevinProvider(pi, modelsFromCatalog(catalog));
-    }
+    const credentials = readCredentials();
+    if (credentials) await refreshDevinProvider(pi, credentials);
   } catch {
     // fallback models already registered
   }
 
   pi.on("session_start", async () => {
     try {
-      if (!_pi || !readCredentials()) return;
-      const catalog = await loadCliCatalog();
-      registerDevinProvider(_pi, modelsFromCatalog(catalog));
+      const credentials = readCredentials();
+      if (!_pi || !credentials) return;
+      await refreshDevinProvider(_pi, credentials);
     } catch {
       // keep current models
     }
@@ -86,12 +94,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const status = await authStatus();
       ctx.ui.notify(
         [
-          bin ? `CLI: ${bin}` : "CLI: not found",
+          bin ? `CLI: ${bin}` : "CLI: not installed (only required for first login)",
           version ? `CLI version: ${version}` : "CLI version: unknown",
           `Client identity: ${CLIENT_IDE} ${CLIENT_VERSION}`,
           status.loggedIn ? "Auth: signed in via Devin CLI" : "Auth: not signed in. Run /login devin or `devin auth login`",
         ].join("\n"),
-        status.loggedIn && bin ? "info" : "warning",
+        status.loggedIn ? "info" : "warning",
       );
     },
   });
@@ -100,10 +108,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     description: "Reload the Devin Local model catalog",
     handler: async (_args, ctx) => {
       try {
-        const catalog = await loadCliCatalog();
-        const models = modelsFromCatalog(catalog);
-        registerDevinProvider(pi, models);
-        ctx.ui.notify(`Devin: loaded ${models.length} families.`, "info");
+        const credentials = readCredentials();
+        if (!credentials) {
+          ctx.ui.notify("Devin: not signed in. Run /login devin", "warning");
+          return;
+        }
+        const count = await refreshDevinProvider(pi, credentials);
+        ctx.ui.notify(`Devin: loaded ${count} families.`, "info");
       } catch (error) {
         ctx.ui.notify(
           `Devin refresh failed: ${error instanceof Error ? error.message : String(error)}`,

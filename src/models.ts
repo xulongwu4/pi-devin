@@ -1,56 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import type { ThinkingLevelMap } from "@earendil-works/pi-ai";
-import { getAgentDir, type ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import { runDevin } from "./cli.js";
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { DevinCatalog, DevinFamily } from "./catalog.js";
 
-export interface DevinVariant {
-  model_uid: string;
-  label: string;
-  max_context_tokens?: number;
-  max_output_tokens?: number;
-  cost_tier?: string;
-  cost_summary?: string;
-  is_new?: boolean;
-  is_beta?: boolean;
-}
-
-export interface DevinFamily {
-  family_label: string;
-  family_uid: string;
-  slug: string;
-  aliases?: string[];
-  variants: DevinVariant[];
-}
-
-export interface DevinCatalog {
-  families: DevinFamily[];
-}
+export type { DevinCatalog, DevinFamily, DevinVariant } from "./catalog.js";
 
 const THINKING_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const CATALOG_CACHE_PATH = join(getAgentDir(), "devin", "models.json");
-
-function parseCatalog(text: string): DevinCatalog | null {
-  const parsed = JSON.parse(text) as DevinCatalog;
-  return Array.isArray(parsed?.families) ? parsed : null;
-}
-
-function readCachedCatalog(): DevinCatalog | null {
-  try {
-    return parseCatalog(readFileSync(CATALOG_CACHE_PATH, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedCatalog(catalog: DevinCatalog): void {
-  try {
-    mkdirSync(dirname(CATALOG_CACHE_PATH), { recursive: true });
-    writeFileSync(CATALOG_CACHE_PATH, JSON.stringify(catalog, null, 2), { mode: 0o600 });
-  } catch {
-    // Cache failures must not block a valid live catalog.
-  }
-}
 
 function parseCost(summary?: string): ProviderModelConfig["cost"] {
   const empty = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -217,25 +171,6 @@ export function modelsFromCatalog(catalog: DevinCatalog | null): ProviderModelCo
   if (!catalog?.families?.length) return FALLBACK_MODELS;
   const models = catalog.families.flatMap(familyToModels);
   return models.length > 0 ? models : FALLBACK_MODELS;
-}
-
-export async function loadCliCatalog(): Promise<DevinCatalog | null> {
-  try {
-    const { stdout, code, stderr } = await runDevin(["models", "list", "--format", "json"], {
-      timeoutMs: 20_000,
-    });
-    if (code !== 0) {
-      throw new Error(stderr.trim() || `devin models list exited ${code}`);
-    }
-    const parsed = parseCatalog(stdout);
-    if (!parsed) throw new Error("devin models list returned an invalid catalog");
-    writeCachedCatalog(parsed);
-    return parsed;
-  } catch (error) {
-    const cached = readCachedCatalog();
-    if (cached) return cached;
-    throw error;
-  }
 }
 
 export function resolveModelUid(
