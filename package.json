@@ -26,9 +26,13 @@
     "src/",
     "README.md",
     "AGENTS.md",
+    "tests/",
     "LICENSE"
   ],
   "scripts": {
+    "pretest": "tsc --noEmit false --outDir .test-dist",
+    "test": "node --test tests/models-cache.test.mjs",
+    "posttest": "node -e \"require('node:fs').rmSync('.test-dist', { recursive: true, force: true })\"",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {

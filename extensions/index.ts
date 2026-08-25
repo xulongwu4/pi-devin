@@ -97,13 +97,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.registerCommand("devin-refresh", {
-    description: "Refresh Devin Local model catalog from `devin models list`",
+    description: "Reload the Devin Local model catalog",
     handler: async (_args, ctx) => {
       try {
         const catalog = await loadCliCatalog();
         const models = modelsFromCatalog(catalog);
         registerDevinProvider(pi, models);
-        ctx.ui.notify(`Devin: loaded ${models.length} families from the local CLI.`, "info");
+        ctx.ui.notify(`Devin: loaded ${models.length} families.`, "info");
       } catch (error) {
         ctx.ui.notify(
           `Devin refresh failed: ${error instanceof Error ? error.message : String(error)}`,

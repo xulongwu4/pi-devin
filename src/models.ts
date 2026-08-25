@@ -1,3 +1,6 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { runDevin } from "./cli.js";
@@ -26,6 +29,33 @@ export interface DevinCatalog {
 }
 
 const THINKING_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const CATALOG_CACHE_PATH = join(
+  process.env.XDG_CACHE_HOME || join(homedir(), ".cache"),
+  "pi-devin",
+  "models.json",
+);
+
+function parseCatalog(text: string): DevinCatalog | null {
+  const parsed = JSON.parse(text) as DevinCatalog;
+  return Array.isArray(parsed?.families) ? parsed : null;
+}
+
+function readCachedCatalog(): DevinCatalog | null {
+  try {
+    return parseCatalog(readFileSync(CATALOG_CACHE_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedCatalog(catalog: DevinCatalog): void {
+  try {
+    mkdirSync(dirname(CATALOG_CACHE_PATH), { recursive: true });
+    writeFileSync(CATALOG_CACHE_PATH, JSON.stringify(catalog, null, 2), { mode: 0o600 });
+  } catch {
+    // Cache failures must not block a valid live catalog.
+  }
+}
 
 function parseCost(summary?: string): ProviderModelConfig["cost"] {
   const empty = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -195,15 +225,22 @@ export function modelsFromCatalog(catalog: DevinCatalog | null): ProviderModelCo
 }
 
 export async function loadCliCatalog(): Promise<DevinCatalog | null> {
-  const { stdout, code, stderr } = await runDevin(["models", "list", "--format", "json"], {
-    timeoutMs: 20_000,
-  });
-  if (code !== 0) {
-    throw new Error(stderr.trim() || `devin models list exited ${code}`);
+  try {
+    const { stdout, code, stderr } = await runDevin(["models", "list", "--format", "json"], {
+      timeoutMs: 20_000,
+    });
+    if (code !== 0) {
+      throw new Error(stderr.trim() || `devin models list exited ${code}`);
+    }
+    const parsed = parseCatalog(stdout);
+    if (!parsed) throw new Error("devin models list returned an invalid catalog");
+    writeCachedCatalog(parsed);
+    return parsed;
+  } catch (error) {
+    const cached = readCachedCatalog();
+    if (cached) return cached;
+    throw error;
   }
-  const parsed = JSON.parse(stdout) as DevinCatalog;
-  if (!parsed?.families) return null;
-  return parsed;
 }
 
 export function resolveModelUid(
