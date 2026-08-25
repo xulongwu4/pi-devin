@@ -1,8 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ThinkingLevelMap } from "@earendil-works/pi-ai";
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { runDevin } from "./cli.js";
 
 export interface DevinVariant {
@@ -29,11 +28,7 @@ export interface DevinCatalog {
 }
 
 const THINKING_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const CATALOG_CACHE_PATH = join(
-  process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"),
-  "devin",
-  "models.json",
-);
+const CATALOG_CACHE_PATH = join(getAgentDir(), "devin", "models.json");
 
 function parseCatalog(text: string): DevinCatalog | null {
   const parsed = JSON.parse(text) as DevinCatalog;
