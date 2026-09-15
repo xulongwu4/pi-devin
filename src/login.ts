@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 // Protocol extracted from the Devin CLI (Rust, chisel-api/src/auth/pkce.rs).
 // Login: PKCE + localhost callback + Connect-JSON code exchange.
 
-export const LOGIN_PATH = "/devin/account/login";
+export const LOGIN_PATH = "/auth/cli/continue";
 export const EXCHANGE_PATH =
   "/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode";
 export const DEFAULT_WEBAPP_HOST = "https://app.devin.ai";
@@ -38,7 +38,7 @@ export function buildLoginUrl(
     code_challenge: challenge,
     code_challenge_method: "S256",
     state,
-    prompt: "login",
+    prompt: "select_account",
   });
   return `${webappHost.replace(/\/$/, "")}${LOGIN_PATH}?${params}`;
 }

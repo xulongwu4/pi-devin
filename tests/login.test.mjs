@@ -11,7 +11,7 @@ test("pkce verifier/challenge follow S256 PKCE shape", () => {
 
 test("login URL carries PKCE params over /devin/account/login", () => {
   const url = new URL(buildLoginUrl("http://127.0.0.1:49152/callback", "abc123"));
-  assert.equal(url.origin + url.pathname, "https://app.devin.ai/devin/account/login");
+  assert.equal(url.origin + url.pathname, "https://app.devin.ai/auth/cli/continue");
   assert.equal(url.searchParams.get("cli_pkce_marker"), "1");
   assert.equal(url.searchParams.get("response_type"), "code");
   assert.equal(url.searchParams.get("redirect_uri"), "http://127.0.0.1:49152/callback");
@@ -19,7 +19,7 @@ test("login URL carries PKCE params over /devin/account/login", () => {
   assert.equal(url.searchParams.get("code_challenge"), "abc123");
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
   assert.ok(url.searchParams.get("state"));
-  assert.equal(url.searchParams.get("prompt"), "login");
+  assert.equal(url.searchParams.get("prompt"), "select_account");
 });
 
 test("callback server validates state and returns the code", async () => {
