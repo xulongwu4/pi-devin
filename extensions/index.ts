@@ -1,11 +1,17 @@
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import { createProvider, type Model, type OAuthCredential } from "@earendil-works/pi-ai";
-import { loginWithCli } from "../src/credentials.js";
-import { whichDevin, devinVersion } from "../src/cli.js";
+import { randomBytes } from "node:crypto";
+import { createProvider, type Model } from "@earendil-works/pi-ai";
 import { loadCachedCatalog, loadCatalog } from "../src/catalog.js";
 import { modelsFromCatalog } from "../src/models.js";
 import { CLIENT_IDE, CLIENT_VERSION } from "../src/metadata.js";
 import { streamDevin } from "../src/stream.js";
+import {
+  DEFAULT_API_SERVER,
+  buildLoginUrl,
+  exchangePkceCode,
+  pkcePair,
+  startCallbackServer,
+} from "../src/login.js";
 
 const PROVIDER_ID = "devin";
 const API_IDENTIFIER = "devin-local" as const;
@@ -34,32 +40,53 @@ function createDevinProvider() {
     name: "Devin Local",
     baseUrl: DEFAULT_BASE_URL,
     auth: {
-      oauth: {
-        name: "Devin CLI",
-        isSubscription: true,
-        async login(): Promise<OAuthCredential> {
-          const credentials = await loginWithCli();
-          return {
-            type: "oauth",
-            refresh: "",
-            access: credentials.apiKey,
-            expires: Date.now() + ONE_YEAR_MS,
-          };
+      apiKey: {
+        name: "Devin API key",
+        async login(interaction) {
+          interaction.signal.throwIfAborted();
+          const method = await interaction.prompt({
+            type: "select",
+            message: "How would you like to log in to Devin?",
+            options: [
+              { id: "browser", label: "Log in with browser", description: "Opens app.devin.ai and signs in with PKCE (recommended)" },
+              { id: "key", label: "Paste an API key", description: "For SSH/remote sessions, or copying a key from credentials.toml" },
+            ],
+          });
+          if (method === "key") {
+            const key = (await interaction.prompt({ type: "secret", message: "Enter Devin API key" })).trim();
+            if (!key) throw new Error("Devin: no API key entered");
+            return { type: "api_key", key };
+          }
+
+          const { verifier, challenge } = pkcePair();
+          const state = randomBytes(16).toString("base64url");
+          const pending = startCallbackServer(state, interaction.signal);
+          try {
+            const redirectUri = await pending.redirectUri;
+            interaction.notify({
+              type: "auth_url",
+              url: buildLoginUrl(redirectUri, challenge, state),
+              instructions: "Sign in to Devin in your browser; it redirects back to this machine.",
+            });
+            const code = await pending.code;
+            interaction.notify({ type: "progress", message: "Exchanging authorization code..." });
+            const { apiKey } = await exchangePkceCode(code, verifier, redirectUri, DEFAULT_API_SERVER, interaction.signal);
+            return { type: "api_key", key: apiKey };
+          } finally {
+            pending.close();
+          }
         },
-        async refresh(credential: OAuthCredential): Promise<OAuthCredential> {
-          return { ...credential, expires: Date.now() + ONE_YEAR_MS };
-        },
-        async toAuth(credential: OAuthCredential) {
-          return { apiKey: credential.access };
+        async resolve({ credential }) {
+          return credential?.key ? { auth: { apiKey: credential.key }, source: "stored API key" } : undefined;
         },
       },
     },
     models: materializeModels(modelsFromCatalog(loadCachedCatalog())),
     async fetchModels(context) {
       const credential = context.credential;
-      if (credential?.type !== "oauth" || !credential.access) return [];
+      if (credential?.type !== "api_key" || !credential.key) return [];
       const catalog = await loadCatalog({
-        apiKey: credential.access,
+        apiKey: credential.key,
         apiServerUrl: DEFAULT_BASE_URL,
         signal: context.signal,
       });
@@ -80,20 +107,14 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("devin-status", {
-    description: "Show Devin auth, endpoint, and optional CLI status",
+    description: "Show Devin auth and endpoint status",
     handler: async (_args, ctx) => {
-      const [apiKey, bin, version] = await Promise.all([
-        ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID),
-        whichDevin(),
-        devinVersion(),
-      ]);
+      const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
       const baseUrl = ctx.modelRegistry.getProvider(PROVIDER_ID)?.baseUrl ?? DEFAULT_BASE_URL;
       ctx.ui.notify(
         [
           apiKey ? "Auth: stored in Pi auth.json" : "Auth: not configured. Run /login devin",
           `Endpoint: ${baseUrl}`,
-          bin ? `CLI: ${bin}` : "CLI: not installed (only required for first login)",
-          version ? `CLI version: ${version}` : "CLI version: unknown",
           `Client identity: ${CLIENT_IDE} ${CLIENT_VERSION}`,
         ].join("\n"),
         apiKey ? "info" : "warning",
