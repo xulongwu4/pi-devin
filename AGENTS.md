@@ -6,7 +6,7 @@ Pi package that registers the native `devin` provider. `/login devin` runs the D
 
 ```
 extensions/index.ts   # native provider, Pi auth, /login, status, refresh
-src/login.ts            # native PKCE login, callback, ExchangeDevinCLIPKCECode
+src/login.ts          # native PKCE login, callback, ExchangeDevinCLIPKCECode (Connect proto)
 src/catalog.ts        # GetCliModelConfigs → cached DevinCatalog
 src/models.ts         # DevinCatalog → ProviderModelConfig[]
 src/stream.ts         # streamSimple via GetChatMessage (Connect/protobuf)
@@ -18,7 +18,7 @@ src/context-map.ts    # Pi Context → Cognition chat history
 
 ## Contract
 
-- `/login devin` must run the Devin PKCE flow natively: browser to `app.devin.ai/auth/cli/continue`, localhost `/callback` for the code, exchange via `ExchangeDevinCLIPKCECode`, then persist the returned API key in Pi's native auth store as an OAuth credential (`access`, soft one-year expiry). Browser-only flow; no paste-API-key option. No Devin CLI dependency.
+- `/login devin` must run the Devin PKCE flow natively: browser to `app.devin.ai/auth/cli/continue`, localhost `/callback` for the code, exchange via Connect unary proto `ExchangeDevinCLIPKCECode` (same framing as `GetUserJwt`; session token = field 1), then persist the returned API key in Pi's native auth store as an OAuth credential (`access`, soft one-year expiry). Browser-only flow; no paste-API-key option. No Devin CLI dependency.
 - Runtime auth must come from Pi's resolved `auth.json` credential.
 - `models.json` `providers.devin.baseUrl` must compose above the native provider for inference only; catalog fetch always uses `https://server.codeium.com`.
 - Model IDs must come from `GetCliModelConfigs`, not a hardcoded cloud allowlist.

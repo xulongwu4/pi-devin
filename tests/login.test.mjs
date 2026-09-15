@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { pkcePair, buildLoginUrl, startCallbackServer, exchangePkceCode } = await import("../.test-dist/src/login.js");
+const {
+  pkcePair,
+  buildLoginUrl,
+  startCallbackServer,
+  exchangePkceCode,
+  encodeExchangeRequest,
+  decodeExchangeResponse,
+} = await import("../.test-dist/src/login.js");
+const { encodeString, iterFields } = await import("../.test-dist/src/wire.js");
 
 test("pkce verifier/challenge follow S256 PKCE shape", () => {
   const { verifier, challenge } = pkcePair();
@@ -42,6 +50,43 @@ test("callback server validates state and returns the code", async () => {
   controller.abort();
 });
 
+test("encodeExchangeRequest is code=1, verifier=2, redirect_uri=3", () => {
+  const buf = encodeExchangeRequest("the-code", "the-verifier", "http://127.0.0.1/callback");
+  const fields = Object.fromEntries(
+    [...iterFields(buf)].map((f) => [f.num, Buffer.isBuffer(f.value) ? f.value.toString("utf8") : f.value]),
+  );
+  assert.deepEqual(fields, {
+    1: "the-code",
+    2: "the-verifier",
+    3: "http://127.0.0.1/callback",
+  });
+});
+
+test("decodeExchangeResponse reads session token from proto field 1", () => {
+  const buf = encodeString(1, "devin-session-token$abc");
+  assert.deepEqual(decodeExchangeResponse(buf), { apiKey: "devin-session-token$abc", apiServerUrl: undefined });
+});
+
+test("decodeExchangeResponse reads api_server_url from proto field 3 when it is a URL", () => {
+  const buf = Buffer.concat([
+    encodeString(1, "k"),
+    encodeString(3, "https://server.eu.codeium.com"),
+  ]);
+  assert.deepEqual(decodeExchangeResponse(buf), {
+    apiKey: "k",
+    apiServerUrl: "https://server.eu.codeium.com",
+  });
+});
+
+test("decodeExchangeResponse ignores a non-URL field 3", () => {
+  const buf = Buffer.concat([encodeString(1, "k"), encodeString(3, "primary-org-id")]);
+  assert.deepEqual(decodeExchangeResponse(buf), { apiKey: "k", apiServerUrl: undefined });
+});
+
+test("decodeExchangeResponse throws when field 1 is missing", () => {
+  assert.throws(() => decodeExchangeResponse(encodeString(2, "nope")), /no session token/);
+});
+
 async function withMockedFetch(impl, run) {
   const original = globalThis.fetch;
   globalThis.fetch = impl;
@@ -52,51 +97,36 @@ async function withMockedFetch(impl, run) {
   }
 }
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-test("exchangePkceCode reads sessionToken", async () => {
-  await withMockedFetch(async () => jsonResponse({ sessionToken: "devin-session-token$abc" }), async () => {
+test("exchangePkceCode posts Connect unary proto and decodes field 1", async () => {
+  let requestUrl = "";
+  let requestInit;
+  await withMockedFetch(async (url, init) => {
+    requestUrl = String(url);
+    requestInit = init;
+    return new Response(encodeString(1, "devin-session-token$abc"), {
+      status: 200,
+      headers: { "Content-Type": "application/proto" },
+    });
+  }, async () => {
     const got = await exchangePkceCode("code", "verifier", "http://127.0.0.1/callback");
     assert.equal(got.apiKey, "devin-session-token$abc");
   });
-});
-
-test("exchangePkceCode reads api_key", async () => {
-  await withMockedFetch(async () => jsonResponse({ api_key: "k" }), async () => {
-    const got = await exchangePkceCode("code", "verifier", "http://127.0.0.1/callback");
-    assert.equal(got.apiKey, "k");
-  });
+  assert.equal(
+    requestUrl,
+    "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode",
+  );
+  assert.equal(requestInit.method, "POST");
+  assert.equal(requestInit.headers["Content-Type"], "application/proto");
+  assert.equal(requestInit.headers["Connect-Protocol-Version"], "1");
+  const sent = Buffer.from(requestInit.body);
+  const fields = Object.fromEntries(
+    [...iterFields(sent)].map((f) => [f.num, Buffer.isBuffer(f.value) ? f.value.toString("utf8") : f.value]),
+  );
+  assert.deepEqual(fields, { 1: "code", 2: "verifier", 3: "http://127.0.0.1/callback" });
 });
 
 test("exchangePkceCode throws on HTTP 500", async () => {
   await withMockedFetch(async () => new Response("boom", { status: 500 }), async () => {
     await assert.rejects(() => exchangePkceCode("code", "verifier", "http://127.0.0.1/callback"), /PKCE exchange HTTP 500/);
-  });
-});
-
-test("exchangePkceCode rejects UUID userId without a known key field", async () => {
-  await withMockedFetch(async () => jsonResponse({ userId: "550e8400-e29b-41d4-a716-446655440000" }), async () => {
-    await assert.rejects(
-      () => exchangePkceCode("code", "verifier", "http://127.0.0.1/callback"),
-      /no recognizable API key/,
-    );
-  });
-});
-
-test("exchangePkceCode missing-key error includes truncated response shape", async () => {
-  await withMockedFetch(async () => jsonResponse({ userId: "550e8400-e29b-41d4-a716-446655440000" }), async () => {
-    await assert.rejects(
-      () => exchangePkceCode("code", "verifier", "http://127.0.0.1/callback"),
-      (err) => {
-        assert.match(String(err), /no recognizable API key/);
-        assert.match(String(err), /550e8400-e29b-41.../);
-        return true;
-      },
-    );
   });
 });

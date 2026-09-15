@@ -1,8 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import { encodeString, iterFields } from "./wire.js";
 
 // Protocol extracted from the Devin CLI (Rust, chisel-api/src/auth/pkce.rs).
-// Login: PKCE + localhost callback + Connect-JSON code exchange.
+// Login: PKCE + localhost callback + Connect unary proto exchange, same
+// framing as GetUserJwt. Request/response field numbers follow the nearby
+// seat_management PKCE messages (code=1, code_verifier=2, redirect_uri=3;
+// session token / api_key = field 1).
 
 export const LOGIN_PATH = "/auth/cli/continue";
 export const EXCHANGE_PATH =
@@ -119,6 +123,30 @@ export interface DevinExchange {
   apiServerUrl?: string;
 }
 
+export function encodeExchangeRequest(code: string, verifier: string, redirectUri: string): Buffer {
+  return Buffer.concat([
+    encodeString(1, code),
+    encodeString(2, verifier),
+    encodeString(3, redirectUri),
+  ]);
+}
+
+export function decodeExchangeResponse(buf: Buffer): DevinExchange {
+  let apiKey = "";
+  let apiServerUrl: string | undefined;
+  for (const field of iterFields(buf)) {
+    if (field.wire !== 2 || !Buffer.isBuffer(field.value)) continue;
+    const value = field.value.toString("utf8");
+    if (!value) continue;
+    // Field 1 is session_token (ExchangeDevinCode) or api_key (ExchangePKCEAuthorizationCode).
+    if (field.num === 1) apiKey = value;
+    // Field 3 is api_server_url on the Windsurf PKCE response.
+    if (field.num === 3 && /^https?:\/\//i.test(value)) apiServerUrl = value;
+  }
+  if (!apiKey) throw new Error("PKCE exchange returned no session token");
+  return { apiKey, apiServerUrl };
+}
+
 export async function exchangePkceCode(
   code: string,
   verifier: string,
@@ -129,30 +157,15 @@ export async function exchangePkceCode(
   const response = await fetch(`${apiServerUrl.replace(/\/$/, "")}${EXCHANGE_PATH}`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
+      "Content-Type": "application/proto",
       "Connect-Protocol-Version": "1",
     },
-    body: JSON.stringify({ code, codeVerifier: verifier, redirectUri }),
+    body: new Uint8Array(encodeExchangeRequest(code, verifier, redirectUri)),
     signal,
   });
+  const buf = Buffer.from(await response.arrayBuffer());
   if (!response.ok) {
-    throw new Error(`PKCE exchange HTTP ${response.status}: ${(await response.text()).slice(0, 240)}`);
+    throw new Error(`PKCE exchange HTTP ${response.status}: ${buf.toString("utf8").slice(0, 240)}`);
   }
-  const data = (await response.json()) as Record<string, unknown>;
-  const str = (v: unknown): string => (typeof v === "string" ? v : "");
-  // The devin exchange returns a session token ("devin-session-token$..." in
-  // credentials.toml's windsurf_api_key); the windsurf variant returns api_key.
-  const apiKey = ["sessionToken", "session_token", "windsurfApiKey", "windsurf_api_key", "apiKey", "api_key", "accessToken", "access_token"]
-    .map((name) => str(data[name]))
-    .find(Boolean) ?? "";
-  if (!apiKey) {
-    const shape = JSON.stringify(data, (key, value) =>
-      typeof value === "string" && value.length > 16 ? value.slice(0, 16) + "..." : value,
-    );
-    throw new Error(`PKCE exchange returned no recognizable API key. Response: ${shape.slice(0, 500)}`);
-  }
-  return {
-    apiKey,
-    apiServerUrl: str(data.apiServerUrl) || str(data.api_server_url) || undefined,
-  };
+  return decodeExchangeResponse(buf);
 }
