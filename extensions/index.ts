@@ -45,36 +45,22 @@ function createDevinProvider() {
         isSubscription: true,
         async login(interaction) {
           interaction.signal.throwIfAborted();
-          const method = await interaction.prompt({
-            type: "select",
-            message: "How would you like to log in to Devin?",
-            options: [
-              { id: "browser", label: "Log in with browser", description: "Opens app.devin.ai and signs in with PKCE (recommended)" },
-              { id: "key", label: "Paste an API key", description: "For SSH/remote sessions, or copying a key from credentials.toml" },
-            ],
-          });
-
+          const { verifier, challenge } = pkcePair();
+          const state = randomBytes(16).toString("base64url");
+          const pending = startCallbackServer(state, interaction.signal);
           let key: string;
-          if (method === "key") {
-            key = (await interaction.prompt({ type: "secret", message: "Enter Devin API key" })).trim();
-            if (!key) throw new Error("Devin: no API key entered");
-          } else {
-            const { verifier, challenge } = pkcePair();
-            const state = randomBytes(16).toString("base64url");
-            const pending = startCallbackServer(state, interaction.signal);
-            try {
-              const redirectUri = await pending.redirectUri;
-              interaction.notify({
-                type: "auth_url",
-                url: buildLoginUrl(redirectUri, challenge, state),
-                instructions: "Sign in to Devin in your browser; it redirects back to this machine.",
-              });
-              const code = await pending.code;
-              interaction.notify({ type: "progress", message: "Exchanging authorization code..." });
-              key = (await exchangePkceCode(code, verifier, redirectUri, DEFAULT_API_SERVER, interaction.signal)).apiKey;
-            } finally {
-              pending.close();
-            }
+          try {
+            const redirectUri = await pending.redirectUri;
+            interaction.notify({
+              type: "auth_url",
+              url: buildLoginUrl(redirectUri, challenge, state),
+              instructions: "Sign in to Devin in your browser; it redirects back to this machine.",
+            });
+            const code = await pending.code;
+            interaction.notify({ type: "progress", message: "Exchanging authorization code..." });
+            key = (await exchangePkceCode(code, verifier, redirectUri, DEFAULT_API_SERVER, interaction.signal)).apiKey;
+          } finally {
+            pending.close();
           }
           // The API key is long-lived; wrap it as an OAuth credential with a
           // soft one-year sentinel expiry (same as the original provider).
