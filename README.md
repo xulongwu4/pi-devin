@@ -2,7 +2,7 @@
 
 A [Pi](https://pi.dev) package that uses **Devin Local** models inside Pi.
 
-Pi stays the harness. The [Devin CLI](https://docs.devin.ai/cli) is used for first login only; after credentials exist, pi-devin fetches the Devin Local catalog and streams completions directly. This is not an ACP integration and does not use Zed.
+Pi stays the harness. `/login devin` runs the Devin PKCE browser flow natively (no Devin CLI). After credentials exist, pi-devin fetches the Devin Local catalog and streams completions directly. This is not an ACP integration and does not use Zed.
 
 ## Why this exists
 
@@ -12,20 +12,12 @@ Pi stays the harness. The [Devin CLI](https://docs.devin.ai/cli) is used for fir
 This model is only in Devin Local.
 ```
 
-Those models are available through Devin Local. On first login this package imports the CLI credential into Pi's `auth.json`; catalog discovery and inference then use Pi's stored credential directly so Pi's tools, sessions, and UI stay in charge.
+Those models are available through Devin Local. First login stores the credential in Pi's `auth.json`; catalog discovery and inference then use that so Pi's tools, sessions, and UI stay in charge.
 
 ## Requirements
 
 - Pi Coding Agent 0.80+
-- The [Devin CLI](https://docs.devin.ai/cli) for first login, or an existing `devin` entry in Pi's `auth.json`
 - Node 18+
-
-For first login, the CLI binary is resolved in this order:
-
-1. `$DEVIN_CLI`
-2. `~/.local/bin/devin`, Homebrew, `/usr/local/bin/devin`
-3. Devin.app's bundled `devin` binary
-4. `which devin`
 
 ## Install
 
@@ -58,7 +50,7 @@ Restart Pi or run `/reload`.
 /model devin/gpt-5-6-sol-high
 ```
 
-`/login devin` runs `devin auth login` when needed, then stores the resulting API key under `devin` in Pi's `auth.json`. After that succeeds, inference and catalog refresh do not read `credentials.toml`, so the file and CLI may be removed.
+`/login devin` opens a browser to `app.devin.ai/auth/cli/continue`, receives the code on a localhost `/callback`, and stores an OAuth credential in Pi's `auth.json`.
 
 Override the inference API server in Pi's `models.json`:
 
@@ -74,7 +66,7 @@ Override the inference API server in Pi's `models.json`:
 
 Commands:
 
-- `/devin-status` — Pi auth, effective endpoint, and optional CLI status
+- `/devin-status` — Pi auth and effective endpoint
 - `/devin-refresh` — fetch the Devin Local model catalog directly
 
 Catalog discovery always calls `https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCliModelConfigs`, independent of `models.json`. The last successful catalog is cached at `$PI_CODING_AGENT_DIR/devin/models.json` (default: `~/.pi/agent/devin/models.json`). Network, timeout, HTTP, or decode failures fall back to that cache; a missing or corrupt cache falls back to the bundled models.
@@ -84,7 +76,7 @@ Catalog discovery always calls `https://server.codeium.com/exa.api_server_pb.Api
 | This package | Not this package |
 |---|---|
 | Pi is the agent | Devin taking over the session |
-| Pi `auth.json` after CLI-assisted first login | Fake Windsurf OAuth paste flow |
+| Pi `auth.json` after browser PKCE login | Fake Windsurf OAuth paste flow |
 | Live Devin Local families (Opus 5, Fable 5, Sol, …) | Hardcoded cloud allowlist |
 | Completions streamed into Pi tools | An editor host for Devin |
 
