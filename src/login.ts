@@ -140,10 +140,30 @@ export async function exchangePkceCode(
   }
   const data = (await response.json()) as Record<string, unknown>;
   const str = (v: unknown): string => (typeof v === "string" ? v : "");
-  // Response field names per proto windsurf credentials: windsurf_api_key /
-  // api_server_url. Accept camel and snake spellings.
-  const apiKey = str(data.windsurfApiKey) || str(data.windsurf_api_key) || str(data.apiKey) || str(data.api_key);
-  if (!apiKey) throw new Error("PKCE exchange returned no API key");
+  // The devin exchange returns a session token ("devin-session-token$..." in
+  // credentials.toml's windsurf_api_key); the windsurf variant returns api_key.
+  // Accept known spellings first, then deep-search for key-shaped values.
+  let apiKey = ["sessionToken", "session_token", "windsurfApiKey", "windsurf_api_key", "apiKey", "api_key", "accessToken", "access_token"]
+    .map((name) => str(data[name]))
+    .find(Boolean) ?? "";
+  if (!apiKey) {
+    const strings: Array<{ path: string; value: string }> = [];
+    const walk = (v: unknown, path: string): void => {
+      if (typeof v === "string") strings.push({ path, value: v });
+      else if (Array.isArray(v)) v.forEach((item, i) => walk(item, `${path}[${i}]`));
+      else if (v && typeof v === "object") for (const [k, item] of Object.entries(v)) walk(item, path ? `${path}.${k}` : k);
+    };
+    walk(data, "");
+    apiKey = strings.map((entry) => entry.value).find((value) =>
+      /^(devin-session-token\$|cog_|sk-ws-|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.test(value),
+    ) ?? "";
+    if (!apiKey) {
+      const shape = JSON.stringify(data, (key, value) =>
+        typeof value === "string" && value.length > 16 ? value.slice(0, 16) + "..." : value,
+      );
+      throw new Error(`PKCE exchange returned no recognizable API key. Response: ${shape.slice(0, 500)}`);
+    }
+  }
   return {
     apiKey,
     apiServerUrl: str(data.apiServerUrl) || str(data.api_server_url) || undefined,
