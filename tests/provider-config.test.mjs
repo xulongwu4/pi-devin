@@ -17,16 +17,15 @@ test("keeps catalog URL fixed while inference uses model baseUrl", async () => {
   };
   extension(pi);
   assert.equal(provider.id, "devin");
-  assert.equal(provider.auth.apiKey !== undefined, true);
+  assert.equal(provider.auth.oauth !== undefined, true);
 
   const credential = {
-    type: "api_key",
-    key: "auth-json-key",
+    type: "oauth",
+    refresh: "",
+    access: "auth-json-key",
+    expires: Date.now() + 60_000,
   };
-  assert.deepEqual(await provider.auth.apiKey.resolve({ credential }), {
-    auth: { apiKey: "auth-json-key" },
-    source: "stored API key",
-  });
+  assert.deepEqual(await provider.auth.oauth.toAuth(credential), { apiKey: "auth-json-key" });
 
   const requestedUrls = [];
   const originalFetch = globalThis.fetch;

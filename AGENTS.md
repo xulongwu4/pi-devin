@@ -17,7 +17,7 @@ src/context-map.ts    # Pi Context → Cognition chat history
 
 ## Contract
 
-- `/login devin` must run the Devin PKCE flow natively: browser to `app.devin.ai/devin/account/login`, localhost `/callback` for the code, exchange via `ExchangeDevinCLIPKCECode`, then persist the returned API key in Pi's native auth store. A paste-API-key fallback must remain. No Devin CLI dependency.
+- `/login devin` must run the Devin PKCE flow natively: browser to `app.devin.ai/devin/account/login`, localhost `/callback` for the code, exchange via `ExchangeDevinCLIPKCECode`, then persist the returned API key in Pi's native auth store as an OAuth credential (`access`, soft one-year expiry). A paste-API-key fallback must remain. No Devin CLI dependency.
 - Runtime auth must come from Pi's resolved `auth.json` credential.
 - `models.json` `providers.devin.baseUrl` must compose above the native provider for inference only; catalog fetch always uses `https://server.codeium.com`.
 - Model IDs must come from `GetCliModelConfigs`, not a hardcoded cloud allowlist.

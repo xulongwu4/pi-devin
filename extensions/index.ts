@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { randomBytes } from "node:crypto";
-import { createProvider, type Model } from "@earendil-works/pi-ai";
+import { createProvider, type Model, type OAuthCredential } from "@earendil-works/pi-ai";
 import { loadCachedCatalog, loadCatalog } from "../src/catalog.js";
 import { modelsFromCatalog } from "../src/models.js";
 import { CLIENT_IDE, CLIENT_VERSION } from "../src/metadata.js";
@@ -40,8 +40,9 @@ function createDevinProvider() {
     name: "Devin Local",
     baseUrl: DEFAULT_BASE_URL,
     auth: {
-      apiKey: {
-        name: "Devin API key",
+      oauth: {
+        name: "Devin",
+        isSubscription: true,
         async login(interaction) {
           interaction.signal.throwIfAborted();
           const method = await interaction.prompt({
@@ -52,41 +53,47 @@ function createDevinProvider() {
               { id: "key", label: "Paste an API key", description: "For SSH/remote sessions, or copying a key from credentials.toml" },
             ],
           });
-          if (method === "key") {
-            const key = (await interaction.prompt({ type: "secret", message: "Enter Devin API key" })).trim();
-            if (!key) throw new Error("Devin: no API key entered");
-            return { type: "api_key", key };
-          }
 
-          const { verifier, challenge } = pkcePair();
-          const state = randomBytes(16).toString("base64url");
-          const pending = startCallbackServer(state, interaction.signal);
-          try {
-            const redirectUri = await pending.redirectUri;
-            interaction.notify({
-              type: "auth_url",
-              url: buildLoginUrl(redirectUri, challenge, state),
-              instructions: "Sign in to Devin in your browser; it redirects back to this machine.",
-            });
-            const code = await pending.code;
-            interaction.notify({ type: "progress", message: "Exchanging authorization code..." });
-            const { apiKey } = await exchangePkceCode(code, verifier, redirectUri, DEFAULT_API_SERVER, interaction.signal);
-            return { type: "api_key", key: apiKey };
-          } finally {
-            pending.close();
+          let key: string;
+          if (method === "key") {
+            key = (await interaction.prompt({ type: "secret", message: "Enter Devin API key" })).trim();
+            if (!key) throw new Error("Devin: no API key entered");
+          } else {
+            const { verifier, challenge } = pkcePair();
+            const state = randomBytes(16).toString("base64url");
+            const pending = startCallbackServer(state, interaction.signal);
+            try {
+              const redirectUri = await pending.redirectUri;
+              interaction.notify({
+                type: "auth_url",
+                url: buildLoginUrl(redirectUri, challenge, state),
+                instructions: "Sign in to Devin in your browser; it redirects back to this machine.",
+              });
+              const code = await pending.code;
+              interaction.notify({ type: "progress", message: "Exchanging authorization code..." });
+              key = (await exchangePkceCode(code, verifier, redirectUri, DEFAULT_API_SERVER, interaction.signal)).apiKey;
+            } finally {
+              pending.close();
+            }
           }
+          // The API key is long-lived; wrap it as an OAuth credential with a
+          // soft one-year sentinel expiry (same as the original provider).
+          return { type: "oauth", refresh: "", access: key, expires: Date.now() + ONE_YEAR_MS };
         },
-        async resolve({ credential }) {
-          return credential?.key ? { auth: { apiKey: credential.key }, source: "stored API key" } : undefined;
+        async refresh(credential) {
+          return { ...credential, expires: Date.now() + ONE_YEAR_MS };
+        },
+        async toAuth(credential) {
+          return { apiKey: credential.access };
         },
       },
     },
     models: materializeModels(modelsFromCatalog(loadCachedCatalog())),
     async fetchModels(context) {
       const credential = context.credential;
-      if (credential?.type !== "api_key" || !credential.key) return [];
+      if (credential?.type !== "oauth" || !credential.access) return [];
       const catalog = await loadCatalog({
-        apiKey: credential.key,
+        apiKey: credential.access,
         apiServerUrl: DEFAULT_BASE_URL,
         signal: context.signal,
       });
