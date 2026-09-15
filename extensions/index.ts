@@ -1,11 +1,17 @@
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { randomBytes } from "node:crypto";
 import { createProvider, type Model, type OAuthCredential } from "@earendil-works/pi-ai";
-import { loginWithCli } from "../src/credentials.js";
-import { whichDevin, devinVersion } from "../src/cli.js";
 import { loadCachedCatalog, loadCatalog } from "../src/catalog.js";
 import { modelsFromCatalog } from "../src/models.js";
 import { CLIENT_IDE, CLIENT_VERSION } from "../src/metadata.js";
 import { streamDevin } from "../src/stream.js";
+import {
+  DEFAULT_API_SERVER,
+  buildLoginUrl,
+  exchangePkceCode,
+  pkcePair,
+  startCallbackServer,
+} from "../src/login.js";
 
 const PROVIDER_ID = "devin";
 const API_IDENTIFIER = "devin-local" as const;
@@ -35,21 +41,35 @@ function createDevinProvider() {
     baseUrl: DEFAULT_BASE_URL,
     auth: {
       oauth: {
-        name: "Devin CLI",
+        name: "Devin",
         isSubscription: true,
-        async login(): Promise<OAuthCredential> {
-          const credentials = await loginWithCli();
-          return {
-            type: "oauth",
-            refresh: "",
-            access: credentials.apiKey,
-            expires: Date.now() + ONE_YEAR_MS,
-          };
+        async login(interaction) {
+          interaction.signal.throwIfAborted();
+          const { verifier, challenge } = pkcePair();
+          const state = randomBytes(16).toString("base64url");
+          const pending = startCallbackServer(state, interaction.signal);
+          let key: string;
+          try {
+            const redirectUri = await pending.redirectUri;
+            interaction.notify({
+              type: "auth_url",
+              url: buildLoginUrl(redirectUri, challenge, state),
+              instructions: "Sign in to Devin in your browser; it redirects back to this machine.",
+            });
+            const code = await pending.code;
+            interaction.notify({ type: "progress", message: "Exchanging authorization code..." });
+            key = (await exchangePkceCode(code, verifier, redirectUri, DEFAULT_API_SERVER, interaction.signal)).apiKey;
+          } finally {
+            pending.close();
+          }
+          // The API key is long-lived; wrap it as an OAuth credential with a
+          // soft one-year sentinel expiry (same as the original provider).
+          return { type: "oauth", refresh: "", access: key, expires: Date.now() + ONE_YEAR_MS };
         },
-        async refresh(credential: OAuthCredential): Promise<OAuthCredential> {
+        async refresh(credential) {
           return { ...credential, expires: Date.now() + ONE_YEAR_MS };
         },
-        async toAuth(credential: OAuthCredential) {
+        async toAuth(credential) {
           return { apiKey: credential.access };
         },
       },
@@ -80,20 +100,14 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("devin-status", {
-    description: "Show Devin auth, endpoint, and optional CLI status",
+    description: "Show Devin auth and endpoint status",
     handler: async (_args, ctx) => {
-      const [apiKey, bin, version] = await Promise.all([
-        ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID),
-        whichDevin(),
-        devinVersion(),
-      ]);
+      const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
       const baseUrl = ctx.modelRegistry.getProvider(PROVIDER_ID)?.baseUrl ?? DEFAULT_BASE_URL;
       ctx.ui.notify(
         [
           apiKey ? "Auth: stored in Pi auth.json" : "Auth: not configured. Run /login devin",
           `Endpoint: ${baseUrl}`,
-          bin ? `CLI: ${bin}` : "CLI: not installed (only required for first login)",
-          version ? `CLI version: ${version}` : "CLI version: unknown",
           `Client identity: ${CLIENT_IDE} ${CLIENT_VERSION}`,
         ].join("\n"),
         apiKey ? "info" : "warning",
