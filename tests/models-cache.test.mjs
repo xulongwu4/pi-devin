@@ -13,12 +13,12 @@ const { encodeMessage, encodeString, encodeVarintField, iterFields } = await imp
 const cachePath = join(agentDir, "devin", "models.json");
 
 function modelConfig(uid, label, family, disabled = false) {
-  const info = Buffer.concat([encodeVarintField(13, 64_000), encodeString(23, family)]);
+  // Live rows carry context in ModelInfo.4 (field 18 is absent on ~all rows).
+  const info = Buffer.concat([encodeVarintField(4, 200_000), encodeVarintField(13, 64_000), encodeString(23, family)]);
   const familyMetadata = encodeString(1, "Test Family");
   return Buffer.concat([
     encodeString(1, label),
     encodeVarintField(4, disabled ? 1 : 0),
-    encodeVarintField(18, 200_000),
     encodeString(22, uid),
     encodeMessage(23, info),
     encodeMessage(30, familyMetadata),

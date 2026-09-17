@@ -138,7 +138,7 @@ function decodeModelConfig(body: Buffer): LiveModelConfig | null {
     label: stringField(body, 1).trim() || uid,
     familyUid: modelInfo ? stringField(modelInfo, 23).trim() : "",
     familyLabel: familyMetadata ? stringField(familyMetadata, 1).trim() : "",
-    contextWindow: varintField(body, 18),
+    contextWindow: modelInfo ? varintField(modelInfo, 4) : undefined,
     maxOutputTokens: modelInfo ? varintField(modelInfo, 13) : undefined,
     costTier: varintField(body, 24),
   };
