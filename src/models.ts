@@ -91,10 +91,13 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
 
   const mappedLevels = THINKING_ORDER.filter((level) => typeof thinkingLevelMap[level] === "string");
   const reasoning = mappedLevels.length > 1;
+  const id = reasoning
+    ? family.family_uid || family.slug || defaultUid
+    : defaultUid;
 
   return [
     {
-      id: defaultUid,
+      id,
       name: family.family_label || family.slug || defaultUid,
       reasoning,
       thinkingLevelMap: reasoning ? thinkingLevelMap : undefined,
@@ -108,7 +111,7 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
 
 export const FALLBACK_MODELS: ProviderModelConfig[] = [
   {
-    id: "claude-opus-5-high",
+    id: "claude-opus-5",
     name: "Claude Opus 5",
     reasoning: true,
     thinkingLevelMap: {
@@ -124,7 +127,7 @@ export const FALLBACK_MODELS: ProviderModelConfig[] = [
     maxTokens: 128_000,
   },
   {
-    id: "claude-5-fable-high",
+    id: "claude-5-fable",
     name: "Claude Fable 5",
     reasoning: true,
     thinkingLevelMap: {
@@ -140,7 +143,7 @@ export const FALLBACK_MODELS: ProviderModelConfig[] = [
     maxTokens: 128_000,
   },
   {
-    id: "gpt-5-6-sol-high",
+    id: "gpt-5-6-sol",
     name: "GPT-5.6 Sol",
     reasoning: true,
     thinkingLevelMap: {
