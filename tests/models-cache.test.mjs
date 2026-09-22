@@ -5,12 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 const root = mkdtempSync(join(tmpdir(), "pi-devin-catalog-"));
-const agentDir = join(root, "agent");
-process.env.PI_CODING_AGENT_DIR = agentDir;
+const cacheHome = join(root, "cache");
+process.env.XDG_CACHE_HOME = cacheHome;
 
 const { loadCatalog } = await import("../.test-dist/src/catalog.js");
 const { encodeMessage, encodeString, encodeVarintField, iterFields } = await import("../.test-dist/src/wire.js");
-const cachePath = join(agentDir, "devin", "models.json");
+const cachePath = join(cacheHome, "pi", "devin", "models.json");
 
 function modelConfig(uid, label, family, disabled = false) {
   // Live rows carry context in ModelInfo.4 (field 18 is absent on ~all rows).

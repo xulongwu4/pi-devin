@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { encodeMessage, encodeString, iterFields } from "./wire.js";
 
 export interface DevinVariant {
@@ -46,7 +46,7 @@ interface LiveModelConfig {
   costTier?: number;
 }
 
-const CACHE_PATH = join(getAgentDir(), "devin", "models.json");
+const CACHE_PATH = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "pi", "devin", "models.json");
 const MODEL_CONFIGS_PATH = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
 // Minimal metadata version verified live without the CLI's opaque fingerprint fields.
 const PROTOCOL_VERSION = "3000.3.27";

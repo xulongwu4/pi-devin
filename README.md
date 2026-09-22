@@ -69,7 +69,7 @@ Commands:
 - `/devin-status` — Pi auth and effective endpoint
 - `/devin-refresh` — fetch the Devin Local model catalog directly
 
-Catalog discovery always calls `https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCliModelConfigs`, independent of `models.json`. The last successful catalog is cached at `$PI_CODING_AGENT_DIR/devin/models.json` (default: `~/.pi/agent/devin/models.json`). Network, timeout, HTTP, or decode failures fall back to that cache; a missing or corrupt cache falls back to the bundled models.
+Catalog discovery always calls `https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCliModelConfigs`, independent of `models.json`. The last successful catalog is cached at `$XDG_CACHE_HOME/pi/devin/models.json` (default: `~/.cache/pi/devin/models.json`). Network, timeout, HTTP, or decode failures fall back to that cache; a missing or corrupt cache falls back to the bundled models.
 
 ## What this is / is not
 
