@@ -4,7 +4,7 @@ import {
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
-  type Context,
+  type TranscriptContext,
   type Model,
   type SimpleStreamOptions,
   calculateCost,
@@ -402,7 +402,7 @@ async function* streamChatEvents(args: {
 
 export function streamDevin(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();

@@ -6,6 +6,7 @@ import test from "node:test";
 
 const root = mkdtempSync(join(tmpdir(), "pi-devin-provider-"));
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+process.env.XDG_CACHE_HOME = join(root, "cache");
 const extension = (await import("../.test-dist/extensions/index.js")).default;
 
 test("keeps catalog URL fixed while inference uses model baseUrl", async () => {

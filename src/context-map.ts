@@ -1,4 +1,11 @@
-import type { Context, Message, Tool } from "@earendil-works/pi-ai";
+import {
+  type Message,
+  type Tool,
+  type TranscriptContext,
+  collapseSystemMessages,
+  getCurrentSystemPrompt,
+  getCurrentTools,
+} from "@earendil-works/pi-ai";
 
 export interface ContentPart {
   type: "text" | "image";
@@ -39,13 +46,16 @@ function userContent(content: Message["content"]): string | ContentPart[] {
   return parts;
 }
 
-export function mapContextToChat(context: Context): MappedChat {
+export function mapContextToChat(context: TranscriptContext): MappedChat {
+  // Devin's wire format has no mid-conversation system messages, so fold them into the leading one.
+  const transcript = collapseSystemMessages(context);
   const messages: ChatHistoryItem[] = [];
-  if (context.systemPrompt) {
-    messages.push({ role: "system", content: context.systemPrompt });
+  const systemPrompt = getCurrentSystemPrompt(transcript.messages);
+  if (systemPrompt) {
+    messages.push({ role: "system", content: systemPrompt });
   }
 
-  for (const message of context.messages) {
+  for (const message of transcript.messages) {
     if (message.role === "user") {
       messages.push({ role: "user", content: userContent(message.content) });
       continue;
@@ -86,7 +96,7 @@ export function mapContextToChat(context: Context): MappedChat {
     }
   }
 
-  const tools: ToolDef[] = (context.tools ?? []).map((tool: Tool) => ({
+  const tools: ToolDef[] = getCurrentTools(transcript.messages).map((tool: Tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
