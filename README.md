@@ -69,6 +69,12 @@ Commands:
 - `/devin-status` — Pi auth and effective endpoint
 - `/devin-refresh` — fetch the Devin Local model catalog directly
 
+## [0.2.0] - 2026-09-17
+### Changed
+- Enum-backed models now use readable family IDs, such as `devin/gpt-5.2`, instead of raw backend IDs like `devin/MODEL_GPT_5_2_LOW`. Requests still use the original backend IDs. Reselect saved models after upgrading.
+
+Pi's model picker displays model IDs. Enum-backed models now use readable family IDs (for example, `devin/gpt-5.2` instead of `devin/MODEL_GPT_5_2_LOW`), while requests still use the original backend IDs. After upgrading, run `/reload` and reselect the family with `/model`; choose its thinking level separately. Saved settings or sessions referencing an old `MODEL_…` ID are not automatically migrated and may warn or fall back, so update those selections to the new family ID.
+
 Catalog discovery always calls `https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCliModelConfigs`, independent of `models.json`. The last successful catalog is cached at `$XDG_CACHE_HOME/pi/devin/models.json` (default: `~/.cache/pi/devin/models.json`). Network, timeout, HTTP, or decode failures fall back to that cache; a missing or corrupt cache falls back to the bundled models.
 
 ## What this is / is not

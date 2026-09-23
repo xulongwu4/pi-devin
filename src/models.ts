@@ -22,6 +22,7 @@ function parseCost(summary?: string): ProviderModelConfig["cost"] {
 }
 
 function variantKey(uid: string): string | null {
+  uid = uid.toLowerCase().replaceAll("_", "-");
   const suffixes = [
     "none-priority",
     "low-priority",
@@ -91,16 +92,18 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
 
   const mappedLevels = THINKING_ORDER.filter((level) => typeof thinkingLevelMap[level] === "string");
   const reasoning = mappedLevels.length > 1;
-  const id = reasoning
-    ? family.family_uid || family.slug || defaultUid
-    : defaultUid;
+  // Pi's picker displays the id, not the name. Keep wire enums in the routing map.
+  const familyId = [family.family_uid, family.slug].find((value) => value && !value.startsWith("MODEL_"))
+    || family.family_label.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-|-$/g, "")
+    || defaultUid;
+  const id = reasoning || defaultUid.startsWith("MODEL_") ? familyId : defaultUid;
 
   return [
     {
       id,
       name: family.family_label || family.slug || defaultUid,
       reasoning,
-      thinkingLevelMap: reasoning ? thinkingLevelMap : undefined,
+      thinkingLevelMap: reasoning || id !== defaultUid ? thinkingLevelMap : undefined,
       input: ["text", "image"],
       cost: parseCost(sample.cost_summary),
       contextWindow: sample.max_context_tokens ?? 256_000,
