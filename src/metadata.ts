@@ -7,8 +7,10 @@ import {
 } from "./wire.js";
 
 /**
- * Cognition version-gates GetChatMessage against a known Windsurf/Devin Desktop
- * release. The Devin CLI build id (`3000.4.25`) is not that string and the
+ * Cognition gates Devin Local-only models (GPT-5.6, GPT-6 Astra, ...) by client
+ * ide: ide="windsurf" gets "This model is only in Devin Local."; ide="devin-desktop"
+ * is served. It also version-gates GetChatMessage against a known Windsurf/Devin
+ * Desktop release. The Devin CLI build id (`3000.4.25`) is not that string and the
  * server answers: "Your Windsurf version is out of date."
  * Prefer the installed Devin.app product.json, then a current desktop release.
  */
@@ -29,7 +31,7 @@ function desktopWindsurfVersion(): string {
 }
 
 export const CLIENT_VERSION = desktopWindsurfVersion();
-export const CLIENT_IDE = "windsurf";
+export const CLIENT_IDE = "devin-desktop";
 
 export interface MetadataInput {
   apiKey: string;
