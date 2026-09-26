@@ -69,6 +69,11 @@ Commands:
 - `/devin-status` — Pi auth and effective endpoint
 - `/devin-refresh` — fetch the Devin Local model catalog directly
 
+## [0.3.0] - 2026-09-26
+### Changed
+- Model costs now come from the live catalog's per-model prices (Input / Cached input / Output per 1M tokens), matching `devin models list`.
+- Free models (for example SWE-2) show `(Free)` in their name, e.g. `SWE-2 (Free)`. Model ids are unchanged; type `free` in `/model` to find them, since the picker search also matches names.
+
 ## [0.2.0] - 2026-09-17
 ### Changed
 - Enum-backed models now use readable family IDs, such as `devin/gpt-5.2`, instead of raw backend IDs like `devin/MODEL_GPT_5_2_LOW`. Requests still use the original backend IDs. Reselect saved models after upgrading.

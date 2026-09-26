@@ -29,6 +29,12 @@ export function encodeVarintField(fieldNum: number, v: number | bigint): Buffer 
   return Buffer.concat([encodeTag(fieldNum, 0), encodeVarint(v)]);
 }
 
+export function encodeFixed32Field(fieldNum: number, v: number): Buffer {
+  const b = Buffer.alloc(4);
+  b.writeFloatLE(v, 0);
+  return Buffer.concat([encodeTag(fieldNum, 5), b]);
+}
+
 export function encodeFixed64Field(fieldNum: number, v: number): Buffer {
   const b = Buffer.alloc(8);
   b.writeDoubleLE(v, 0);

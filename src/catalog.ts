@@ -3,13 +3,27 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { encodeMessage, encodeString, iterFields } from "./wire.js";
 
+/**
+ * One `ClientModelConfig.32` (ModelDimension) row: a price (`Input` / 5 / `1M tokens`)
+ * or, for fusion sidekicks, a price-less label (`Sidekick` / display `Free`).
+ */
+export interface DevinCostDimension {
+  label: string;
+  value?: number;
+  unit?: string;
+  display?: string;
+}
+
 export interface DevinVariant {
   model_uid: string;
   label: string;
   max_context_tokens?: number;
   max_output_tokens?: number;
   cost_tier?: string;
+  /** Display string in the Devin CLI format; structured prices live in `cost_dimensions`. */
   cost_summary?: string;
+  cost_dimensions?: DevinCostDimension[];
+  is_free?: boolean;
   is_new?: boolean;
   is_beta?: boolean;
 }
@@ -44,6 +58,7 @@ interface LiveModelConfig {
   contextWindow?: number;
   maxOutputTokens?: number;
   costTier?: number;
+  costDimensions: DevinCostDimension[];
 }
 
 const CACHE_PATH = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "pi", "devin", "models.json");
@@ -126,6 +141,75 @@ function varintField(body: Buffer, number: number): number | undefined {
   return undefined;
 }
 
+// Prices are `float` (wire 5) on the wire today; accept `double` (wire 1) too so a
+// proto type change cannot silently drop every dimension.
+function floatingField(body: Buffer, number: number): number | undefined {
+  for (const field of iterFields(body)) {
+    if (field.num !== number || !Buffer.isBuffer(field.value)) continue;
+    // float32 carries ~7 significant digits; drop the widening noise (0.1 -> 0.10000000149).
+    if (field.wire === 5) return Number(field.value.readFloatLE(0).toPrecision(7));
+    if (field.wire === 1) return field.value.readDoubleLE(0);
+  }
+  return undefined;
+}
+
+function formatUsd(value: number): string {
+  return String(Math.round(value * 1e4) / 1e4);
+}
+
+function decodeCostDimension(body: Buffer): DevinCostDimension | null {
+  const label = stringField(body, 1).trim();
+  if (!label) return null;
+  const value = floatingField(body, 2);
+  if (value !== undefined && Number.isFinite(value)) {
+    const unit = stringField(body, 3).trim();
+    return unit ? { label, value, unit } : { label, value };
+  }
+  // Price-less rows carry a display string in field 8, e.g. fusion `Sidekick` -> `Free`.
+  const display = stringField(body, 8).trim();
+  return display ? { label, display } : null;
+}
+
+function decodeCostDimensions(body: Buffer): DevinCostDimension[] {
+  const dims: DevinCostDimension[] = [];
+  for (const field of iterFields(body)) {
+    if (field.num !== 32 || field.wire !== 2 || !Buffer.isBuffer(field.value)) continue;
+    const dim = decodeCostDimension(field.value);
+    if (dim) dims.push(dim);
+  }
+  return dims;
+}
+
+// Match the Devin CLI: `$5 / 1M Input · $0.5 / 1M Cached input · $25 / 1M Output`,
+// plus price-less rows as `Sidekick: Free`.
+function formatCostSummary(dims: DevinCostDimension[]): string {
+  return dims.map((dim) => {
+    if (dim.value === undefined) return `${dim.label}: ${dim.display}`;
+    const unit = (dim.unit ?? "1M tokens").replace(/\s*tokens$/i, "").trim() || "1M";
+    return `$${formatUsd(dim.value)} / ${unit} ${dim.label}`;
+  }).join(" \u00b7 ");
+}
+
+type VariantPricing = Pick<DevinVariant, "cost_summary" | "cost_dimensions" | "is_free">;
+
+function pricingFor(config: LiveModelConfig, old?: DevinVariant): VariantPricing {
+  const dims = config.costDimensions;
+  if (dims.length > 0) {
+    const prices = dims.flatMap((dim) => (dim.value === undefined ? [] : [dim.value]));
+    const isFree = prices.length > 0 ? prices.every((value) => value === 0) : config.costTier === 4;
+    return { cost_summary: formatCostSummary(dims), cost_dimensions: dims, is_free: isFree };
+  }
+  // cost_tier 4 + no ModelDimension rows is how the CLI marks SWE-2 as Free.
+  if (config.costTier === 4) return { cost_summary: "Free", is_free: true };
+  // Only reuse cached pricing when the live tier does not contradict it.
+  if (!old || (config.costTier !== undefined && String(config.costTier) !== old.cost_tier)) return {};
+  const pricing: VariantPricing = {};
+  if (old.cost_summary !== undefined) pricing.cost_summary = old.cost_summary;
+  if (old.cost_dimensions !== undefined) pricing.cost_dimensions = old.cost_dimensions;
+  if (old.is_free !== undefined) pricing.is_free = old.is_free;
+  return pricing;
+}
+
 function decodeModelConfig(body: Buffer): LiveModelConfig | null {
   // field 4 `disabled` is Cascade/cloud availability. The Devin CLI deliberately
   // lists these rows because they remain routable through Devin Local.
@@ -141,6 +225,7 @@ function decodeModelConfig(body: Buffer): LiveModelConfig | null {
     contextWindow: modelInfo ? varintField(modelInfo, 4) : undefined,
     maxOutputTokens: modelInfo ? varintField(modelInfo, 13) : undefined,
     costTier: varintField(body, 24),
+    costDimensions: decodeCostDimensions(body),
   };
 }
 
@@ -190,7 +275,7 @@ function normalizeCatalog(configs: LiveModelConfig[], cached: DevinCatalog | nul
     if (contextWindow !== undefined) variant.max_context_tokens = contextWindow;
     if (maxOutputTokens !== undefined) variant.max_output_tokens = maxOutputTokens;
     if (costTier !== undefined) variant.cost_tier = costTier;
-    if (old?.cost_summary !== undefined) variant.cost_summary = old.cost_summary;
+    Object.assign(variant, pricingFor(config, old));
     if (old?.is_new !== undefined) variant.is_new = old.is_new;
     if (old?.is_beta !== undefined) variant.is_beta = old.is_beta;
     family.variants.push(variant);

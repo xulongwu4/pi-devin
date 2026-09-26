@@ -1,24 +1,77 @@
 import type { ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import type { DevinCatalog, DevinFamily } from "./catalog.js";
+import type { DevinCatalog, DevinCostDimension, DevinFamily, DevinVariant } from "./catalog.js";
 
-export type { DevinCatalog, DevinFamily, DevinVariant } from "./catalog.js";
+export type { DevinCatalog, DevinCostDimension, DevinFamily, DevinVariant } from "./catalog.js";
 
 const THINKING_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
-function parseCost(summary?: string): ProviderModelConfig["cost"] {
-  const empty = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  if (!summary) return empty;
-  const input = summary.match(/\$([0-9.]+)\s*\/\s*MTok In/i);
-  const output = summary.match(/\$([0-9.]+)\s*\/\s*MTok Out/i);
-  const inCost = input ? Number(input[1]) : 0;
-  const outCost = output ? Number(output[1]) : 0;
+const EMPTY_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+function parseAmount(summary: string, pattern: RegExp): number | undefined {
+  const match = summary.match(pattern);
+  return match ? Number(match[1]) : undefined;
+}
+
+// Structured ModelDimension rows are authoritative. Labels are matched exactly so
+// fusion rows such as `Sidekick input` never overwrite the primary model's price.
+function costFromDimensions(dims: DevinCostDimension[]): ProviderModelConfig["cost"] | undefined {
+  const byLabel = new Map(dims.flatMap((dim) => (
+    dim.value === undefined ? [] : [[dim.label.trim().toLowerCase(), dim.value] as const]
+  )));
+  const input = byLabel.get("input");
+  const output = byLabel.get("output");
+  if (input === undefined && output === undefined) return undefined;
+  const inCost = input ?? 0;
   return {
     input: inCost,
-    output: outCost,
-    cacheRead: Number((inCost * 0.1).toFixed(4)),
+    output: output ?? 0,
+    cacheRead: byLabel.get("cached input") ?? byLabel.get("cache read") ?? Number((inCost * 0.1).toFixed(4)),
+    // Devin publishes no cache-write price; bill writes at the input rate unless one appears.
+    cacheWrite: byLabel.get("cache write") ?? inCost,
+  };
+}
+
+// Fallback for caches written before `cost_dimensions` existed.
+// CLI: `$5 / 1M Input · $0.5 / 1M Cached input · $25 / 1M Output`; legacy: `$5 / MTok In`.
+const PRICE = String.raw`\$([0-9.]+)\s*\/\s*(?:1M(?:\s+tokens)?|MTok)\s+`;
+const INPUT_PRICE = new RegExp(String.raw`${PRICE}In(?:put)?\b`, "i");
+const OUTPUT_PRICE = new RegExp(String.raw`${PRICE}Out(?:put)?\b`, "i");
+const CACHED_INPUT_PRICE = new RegExp(String.raw`${PRICE}Cached\s+input\b`, "i");
+
+function costFromSummary(summary?: string): ProviderModelConfig["cost"] {
+  if (!summary || /^free$/i.test(summary.trim())) return { ...EMPTY_COST };
+  const input = parseAmount(summary, INPUT_PRICE);
+  const output = parseAmount(summary, OUTPUT_PRICE);
+  const cacheRead = parseAmount(summary, CACHED_INPUT_PRICE);
+  if (input === undefined && output === undefined) return { ...EMPTY_COST };
+  const inCost = input ?? 0;
+  return {
+    input: inCost,
+    output: output ?? 0,
+    cacheRead: cacheRead ?? Number((inCost * 0.1).toFixed(4)),
     cacheWrite: Number((inCost * 1.25).toFixed(4)),
   };
+}
+
+function parseCost(variant: DevinVariant): ProviderModelConfig["cost"] {
+  return (variant.cost_dimensions && costFromDimensions(variant.cost_dimensions))
+    ?? costFromSummary(variant.cost_summary);
+}
+
+function isFreeVariant(variant: DevinVariant): boolean {
+  if (variant.is_free !== undefined) return variant.is_free;
+  // Legacy caches: no is_free flag yet.
+  const summary = variant.cost_summary?.trim();
+  if (summary && /^free$/i.test(summary)) return true;
+  if (summary && /\$[0-9]/.test(summary)) return false;
+  return variant.cost_tier === "4";
+}
+
+// Free status is display-only: the Pi id stays stable (Pi's /model search also matches name).
+function freeName(name: string): string {
+  const trimmed = name.trim();
+  return /[([]\s*free\s*[)\]]$/i.test(trimmed) ? trimmed : `${trimmed} (Free)`;
 }
 
 function variantKey(uid: string): string | null {
@@ -97,15 +150,16 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
     || family.family_label.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-|-$/g, "")
     || defaultUid;
   const id = reasoning || defaultUid.startsWith("MODEL_") ? familyId : defaultUid;
+  const name = family.family_label || family.slug || defaultUid;
 
   return [
     {
       id,
-      name: family.family_label || family.slug || defaultUid,
+      name: isFreeVariant(sample) ? freeName(name) : name,
       reasoning,
       thinkingLevelMap: reasoning || id !== defaultUid ? thinkingLevelMap : undefined,
       input: ["text", "image"],
-      cost: parseCost(sample.cost_summary),
+      cost: parseCost(sample),
       contextWindow: sample.max_context_tokens ?? 256_000,
       maxTokens: sample.max_output_tokens ?? 128_000,
     },
