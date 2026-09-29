@@ -69,6 +69,11 @@ Commands:
 - `/devin-status` — Pi auth and effective endpoint
 - `/devin-refresh` — fetch the Devin Local model catalog directly
 
+## [0.3.1]
+### Fixed
+- Devin inference now invokes Pi's request/response hooks, supporting payload inspection, mutation, and replacement without exposing credentials.
+- Invalid top-level payloads fail clearly before network requests; stream start follows response setup, and hook failures or cancellation clean up unread responses.
+
 ## [0.3.0] - 2026-09-26
 ### Changed
 - Model costs now come from the live catalog's per-model prices (Input / Cached input / Output per 1M tokens), matching `devin models list`.
@@ -81,6 +86,14 @@ Commands:
 Pi's model picker displays model IDs. Enum-backed models now use readable family IDs (for example, `devin/gpt-5.2` instead of `devin/MODEL_GPT_5_2_LOW`), while requests still use the original backend IDs. After upgrading, run `/reload` and reselect the family with `/model`; choose its thinking level separately. Saved settings or sessions referencing an old `MODEL_…` ID are not automatically migrated and may warn or fall back, so update those selections to the new family ID.
 
 Catalog discovery always calls `https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCliModelConfigs`, independent of `models.json`. The last successful catalog is cached at `$XDG_CACHE_HOME/pi/devin/models.json` (default: `~/.cache/pi/devin/models.json`). Network, timeout, HTTP, or decode failures fall back to that cache; a missing or corrupt cache falls back to the bundled models.
+
+## Inference hooks
+
+Devin supports Pi's `before_provider_request` (`onPayload`) and `after_provider_response` (`onResponse`) hooks for chat inference, not login, JWT, or catalog requests.
+
+The payload is a structured object with `modelUid`, `messages`, `tools`, and `maxOutputTokens`, before protobuf encoding. Hooks may mutate it in place or return a replacement; returning `undefined` keeps it. The top-level payload must have a non-empty string `modelUid` and a `messages` array; optional `tools` must be an array and `maxOutputTokens` a positive safe integer. Invalid top-level payloads fail before any network request. Credentials and transport metadata are excluded. This is Devin's format, not Anthropic/OpenAI JSON, so extensions must handle `devin-local` explicitly when modifying it.
+
+Response hooks receive `{ status, headers }` before the body is read, including HTTP error responses. Both callbacks are awaited and receive the selected model as their second argument. `start` is emitted only after the response hook succeeds and the response is usable. Callback failures terminate inference with an error; cancellation is checked when each hook completes, producing an aborted result and cancelling any unread chat response.
 
 ## What this is / is not
 

@@ -275,22 +275,44 @@ async function* streamChatEvents(args: {
   tools?: ToolDef[];
   maxOutputTokens?: number;
   signal?: AbortSignal;
-}): AsyncGenerator<CloudChatEvent> {
+}, model: Model<Api>, options?: SimpleStreamOptions): AsyncGenerator<CloudChatEvent | { kind: "start" }> {
+  // Keep credentials and transport metadata out of the inspectable payload.
+  let payload = {
+    modelUid: args.modelUid,
+    messages: args.messages,
+    tools: args.tools,
+    maxOutputTokens: args.maxOutputTokens,
+  };
+  const replacement = await options?.onPayload?.(payload, model);
+  args.signal?.throwIfAborted();
+  if (replacement !== undefined) payload = replacement as typeof payload;
+  if (
+    !payload || typeof payload !== "object" || Array.isArray(payload) ||
+    typeof payload.modelUid !== "string" || !payload.modelUid.trim() ||
+    !Array.isArray(payload.messages) ||
+    (payload.tools !== undefined && !Array.isArray(payload.tools)) ||
+    (payload.maxOutputTokens !== undefined &&
+      (!Number.isSafeInteger(payload.maxOutputTokens) || payload.maxOutputTokens <= 0))
+  ) {
+    throw new Error("Invalid Devin payload: expected a non-empty modelUid string, messages array, " +
+      "optional tools array, and optional positive safe-integer maxOutputTokens");
+  }
+
   const host = args.host.replace(/\/$/, "");
   const userJwt = await getCachedUserJwt(args.apiKey, host, args.signal);
   const ids = sessionIds(args.apiKey, host);
   const proto = buildGetChatMessageRequest({
     apiKey: args.apiKey,
     userJwt,
-    modelUid: args.modelUid,
-    messages: args.messages,
-    tools: args.tools,
+    modelUid: payload.modelUid,
+    messages: payload.messages,
+    tools: payload.tools,
     cascadeId: ids.cascadeId,
     promptId: randomUUID(),
     sessionId: ids.sessionId,
     requestId: BigInt(Date.now()),
     triggerId: randomUUID(),
-    maxOutputTokens: args.maxOutputTokens,
+    maxOutputTokens: payload.maxOutputTokens,
   });
 
   const resp = await fetch(`${host}/exa.api_server_pb.ApiServerService/GetChatMessage`, {
@@ -304,11 +326,20 @@ async function* streamChatEvents(args: {
     body: new Uint8Array(frameConnectStream(proto, true)),
     signal: args.signal,
   });
+  try {
+    await options?.onResponse?.({ status: resp.status, headers: Object.fromEntries(resp.headers) }, model);
+    args.signal?.throwIfAborted();
+  } catch (error) {
+    // A failed hook must not leave the unread response streaming in the background.
+    await resp.body?.cancel().catch(() => {});
+    throw error;
+  }
   if (!resp.ok) {
     throw new Error(`GetChatMessage HTTP ${resp.status}: ${(await resp.text()).slice(0, 300)}`);
   }
   if (!resp.body) throw new Error("GetChatMessage returned an empty body");
 
+  yield { kind: "start" };
   const reader = resp.body.getReader();
   const queue: Buffer[] = [];
   let queued = 0;
@@ -476,7 +507,6 @@ export function streamDevin(
       const host = model.baseUrl || "https://server.codeium.com";
       const modelUid = resolveModelUid(model.id, model.thinkingLevelMap, options?.reasoning);
       const mapped = mapContextToChat(context);
-      stream.push({ type: "start", partial: output });
 
       for await (const event of streamChatEvents({
         apiKey,
@@ -486,8 +516,10 @@ export function streamDevin(
         tools: mapped.tools.length > 0 ? mapped.tools : undefined,
         maxOutputTokens: options?.maxTokens,
         signal: options?.signal,
-      })) {
-        if (event.kind === "text") {
+      }, model, options)) {
+        if (event.kind === "start") {
+          stream.push({ type: "start", partial: output });
+        } else if (event.kind === "text") {
           closeThinking();
           if (!textOpen) {
             output.content.push({ type: "text", text: "" });
