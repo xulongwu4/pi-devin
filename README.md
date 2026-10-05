@@ -93,7 +93,17 @@ Devin supports Pi's `before_provider_request` (`onPayload`) and `after_provider_
 
 The payload is a structured object with `modelUid`, `messages`, `tools`, and `maxOutputTokens`, before protobuf encoding. Hooks may mutate it in place or return a replacement; returning `undefined` keeps it. The top-level payload must have a non-empty string `modelUid` and a `messages` array; optional `tools` must be an array and `maxOutputTokens` a positive safe integer. Invalid top-level payloads fail before any network request. Credentials and transport metadata are excluded. This is Devin's format, not Anthropic/OpenAI JSON, so extensions must handle `devin-local` explicitly when modifying it.
 
+By the time `onPayload` runs, later system updates are already user-role `<system>` text and cannot be distinguished from user-typed blocks using the payload alone. Hooks needing the original roles should use Pi’s context hooks before provider mapping. Preserve the encoded update messages when modifying payloads: introducing mid-history `role: "system"` messages invokes the legacy encoder’s merging behavior, which can move their text into a later user message.
+
 Response hooks receive `{ status, headers }` before the body is read, including HTTP error responses. Both callbacks are awaited and receive the selected model as their second argument. `start` is emitted only after the response hook succeeds and the response is usable. Callback failures terminate inference with an error; cancellation is checked when each hook completes, producing an aborted result and cancelling any unread chat response.
+
+## Prompt updates and caching
+
+The initial system prompt keeps its existing encoding. Later Pi system messages become standalone `<system>`-wrapped user messages, using Pi’s renderer to identify section replacements and removals. Updates wait until outstanding tool results arrive, or until the next user/assistant turn or transcript end closes an interrupted batch. Missing results no longer block later updates; existing orphaned tool-call history is preserved without synthesizing results. Legacy transcripts without a leading system message render their first system snapshot in place. Devin’s transport has no native system role; this uses the existing instruction envelope rather than moving updates to the front of the conversation.
+
+**Instruction trust:** `<system>` is text, not an authenticated role or security boundary. A user can type an identical block; later updates extend the initial prompt’s existing trust limitation to later turns. Keep untrusted content separate in the application and do not rely on these delimiters for privilege enforcement. Models can also acknowledge an update instead of continuing the task; verify behavior on the particular Devin model you use.
+
+Once the initial prompt is paired with a user message, prompt-only updates preserve earlier encoded messages, including when replaying a restored transcript. Empty/tool-only deltas add no instruction message; tool declarations still reflect the current tool set. Changing tool definitions (often alongside rules), compaction, or extensions rewriting the initial prompt can still invalidate caching. Pi upgrades can also change the renderer’s wording for historical updates. Server cache hits are not guaranteed. Existing sessions may have a one-time cache miss when switching from the old collapsed representation. System-only requests retain the existing initial-prompt merging behavior and are not covered by the prefix guarantee.
 
 ## What this is / is not
 
@@ -103,6 +113,14 @@ Response hooks receive `{ status, headers }` before the body is read, including 
 | Pi `auth.json` after browser PKCE login | Fake Windsurf OAuth paste flow |
 | Live Devin Local families (Opus 5, Fable 5, Sol, …) | Hardcoded cloud allowlist |
 | Completions streamed into Pi tools | An editor host for Devin |
+
+## Changelog
+
+### v0.3.2
+
+- **Fixed:** prompt-only instruction updates preserve earlier conversation bytes instead of rewriting the initial prompt.
+- **Fixed:** interrupted tool batches release buffered updates so sessions can continue after cancellation or resume.
+- **Documented:** instruction-envelope trust, hook behavior, and cache limitations.
 
 ## Publish
 

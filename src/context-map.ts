@@ -2,8 +2,8 @@ import {
   type Message,
   type Tool,
   type TranscriptContext,
-  collapseSystemMessages,
-  getCurrentSystemPrompt,
+  getSystemMessageText,
+  renderSystemMessageUpdate,
   getCurrentTools,
 } from "@earendil-works/pi-ai";
 
@@ -47,25 +47,45 @@ function userContent(content: Message["content"]): string | ContentPart[] {
 }
 
 export function mapContextToChat(context: TranscriptContext): MappedChat {
-  // Devin's wire format has no mid-conversation system messages, so fold them into the leading one.
-  const transcript = collapseSystemMessages(context);
   const messages: ChatHistoryItem[] = [];
-  const systemPrompt = getCurrentSystemPrompt(transcript.messages);
-  if (systemPrompt) {
-    messages.push({ role: "system", content: systemPrompt });
-  }
-
-  for (const message of transcript.messages) {
+  const pendingToolCalls = new Set<string>();
+  const pendingUpdates: ChatHistoryItem[] = [];
+  const closeToolCalls = () => {
+    // A new turn or transcript end closes interrupted batches, matching Pi's turn boundaries.
+    pendingToolCalls.clear();
+    messages.push(...pendingUpdates.splice(0));
+  };
+  let hasSystemMessage = false;
+  for (const [index, message] of context.messages.entries()) {
+    if (message.role === "system") {
+      const text = hasSystemMessage ? renderSystemMessageUpdate(message) : getSystemMessageText(message);
+      hasSystemMessage = true;
+      if (text) {
+        // Devin carries instructions in user text. Keep updates out of the cached head and
+        // never insert them between tool calls and their results, even for custom transcripts.
+        const target = pendingToolCalls.size > 0 ? pendingUpdates : messages;
+        target.push(index === 0
+          ? { role: "system", content: text }
+          : { role: "user", content: `<system>\n${text}\n</system>` });
+      }
+      continue;
+    }
     if (message.role === "user") {
+      closeToolCalls();
       messages.push({ role: "user", content: userContent(message.content) });
       continue;
     }
     if (message.role === "assistant") {
+      closeToolCalls();
       const texts: string[] = [];
       const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
       for (const part of message.content) {
         if (part.type === "text") texts.push(part.text);
         if (part.type === "toolCall") {
+          // Pi never executes tools from interrupted responses, so no results will arrive.
+          if (message.stopReason !== "aborted" && message.stopReason !== "error") {
+            pendingToolCalls.add(part.id);
+          }
           toolCalls.push({
             id: part.id,
             name: part.name,
@@ -93,10 +113,13 @@ export function mapContextToChat(context: TranscriptContext): MappedChat {
         content: text,
         tool_call_id: message.toolCallId,
       });
+      pendingToolCalls.delete(message.toolCallId);
+      if (pendingToolCalls.size === 0) closeToolCalls();
     }
   }
 
-  const tools: ToolDef[] = getCurrentTools(transcript.messages).map((tool: Tool) => ({
+  closeToolCalls();
+  const tools: ToolDef[] = getCurrentTools(context.messages).map((tool: Tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,

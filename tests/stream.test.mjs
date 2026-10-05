@@ -184,3 +184,61 @@ test("inference still works without hooks", async (t) => {
   assert.equal(result.stopReason, "stop", result.errorMessage);
   assert.equal(result.content[0].text, "reply");
 });
+
+for (const placement of ["before", "after", "interrupted"]) {
+  test(`system update with ${placement} tool results preserves encoded prefixes across turns`, async (t) => {
+    const requests = [];
+    mockFetch(t, (init) => {
+      const request = gunzipSync(Buffer.from(init.body).subarray(5));
+      requests.push([...iterFields(request)].filter((item) => item.num === 3).map((item) => item.value));
+      return successResponse();
+    });
+    const transcript = normalizeContext({
+      systemPrompt: "base prompt",
+      messages: [{ role: "user", content: [
+        { type: "text", text: "hello" },
+        { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+      ], timestamp: 1 }],
+    });
+    const originalHead = structuredClone(transcript.messages[0]);
+    const first = await streamDevin(model, transcript, { apiKey: "secret-key" }).result();
+    assert.equal(first.stopReason, "stop", first.errorMessage);
+    const text = (prompt) => field(prompt, 3).toString();
+    assert.equal(text(requests[0][0]), "<system>\nbase prompt\n</system>\nhello");
+    const image = field(requests[0][0], 10);
+    assert.equal(field(image, 1).toString(), "aGVsbG8=");
+    assert.equal(field(image, 2).toString(), "image/png");
+
+    const update = { role: "system", content: "", sections: { rules: "new rules", obsolete: null }, timestamp: 2 };
+    const toolResult = { role: "toolResult", toolCallId: "call-1", toolName: "lookup", content: [{ type: "text", text: "result" }], isError: false, timestamp: 3 };
+    const calls = [{ type: "toolCall", id: "call-1", name: "lookup", arguments: {} }];
+    if (placement === "interrupted") calls.push({ ...calls[0], id: "never-ran" });
+    transcript.messages.push(
+      { ...first, content: calls, stopReason: "toolUse" },
+      ...(placement === "before" ? [update, toolResult] : [toolResult, update]),
+    );
+    const second = await streamDevin(model, transcript, { apiKey: "secret-key" }).result();
+    assert.equal(second.stopReason, "stop", second.errorMessage);
+    assert.deepEqual(requests[1].slice(0, requests[0].length), requests[0]);
+    assert.deepEqual(requests[1].map((prompt) => Number(field(prompt, 2))), [1, 2, 4, 1]);
+    assert.equal(text(requests[1][3]),
+      '<system>\nUpdated system prompt section "rules":\n\nnew rules\n\nRemoved system prompt section "obsolete".\n</system>');
+    assert.equal(text(requests[1][2]), "result");
+    assert.equal(field(requests[1][2], 7).toString(), "call-1");
+
+    transcript.messages.push(
+      second,
+      { role: "system", content: "latest instructions", timestamp: 4 },
+    );
+    const third = await streamDevin(model, transcript, { apiKey: "secret-key" }).result();
+    assert.equal(third.stopReason, "stop", third.errorMessage);
+    assert.deepEqual(requests[2].slice(0, requests[1].length), requests[1]);
+    assert.equal(text(requests[2].at(-1)), "<system>\nlatest instructions\n</system>");
+
+    transcript.messages.push(third, { role: "user", content: "next", timestamp: 5 });
+    const resumed = await streamDevin(model, structuredClone(transcript), { apiKey: "secret-key" }).result();
+    assert.equal(resumed.stopReason, "stop", resumed.errorMessage);
+    assert.deepEqual(requests[3].slice(0, requests[2].length), requests[2]);
+    assert.deepEqual(transcript.messages[0], originalHead);
+  });
+}
