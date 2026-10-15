@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
 import { normalizeContext } from "@earendil-works/pi-ai";
-import { streamDevin } from "../.test-dist/src/stream.js";
+import { normalizeSchema, streamDevin } from "../.test-dist/src/stream.js";
 import { clearCachedUserJwt } from "../.test-dist/src/jwt.js";
-import { encodeString, frameConnectStream, iterFields } from "../.test-dist/src/wire.js";
+import { encodeMessage, encodeString, encodeVarintField, frameConnectStream, iterFields } from "../.test-dist/src/wire.js";
 
 const model = {
   id: "test-model", api: "devin-local", provider: "devin", baseUrl: "https://devin.test",
@@ -52,7 +52,7 @@ for (const mode of ["replace", "mutate", "observe"]) {
       apiKey: "secret-key", signal: controller.signal, maxTokens: 42,
       async onPayload(payload, suppliedModel) {
         assert.equal(suppliedModel, model);
-        assert.deepEqual(Object.keys(payload).sort(), ["maxOutputTokens", "messages", "modelUid", "tools"]);
+        assert.deepEqual(Object.keys(payload).sort(), ["maxOutputTokens", "messages", "modelUid", "temperature", "tools"]);
         assert.equal(payload.modelUid, model.id);
         assert.equal(payload.maxOutputTokens, 42);
         assert.equal(payload.messages.at(-1).content, "hello");
@@ -92,10 +92,28 @@ for (const mode of ["replace", "mutate", "observe"]) {
     const changed = mode !== "observe";
     assert.equal(field(sent, 21).toString(), changed ? "hook-model" : model.id);
     assert.equal(field(field(sent, 3), 3).toString(), changed ? "hook prompt" : "hello");
-    assert.equal(Number(field(field(sent, 8), 3)), changed ? 17 : 42);
+    assert.equal(Number(field(field(sent, 8), 2)), changed ? 17 : 42);
     if (changed) assert.equal(field(field(sent, 10), 1).toString(), "hook_tool");
   });
 }
+
+test("sends Pi temperature (clamped above 0) as temperature and first_temperature, defaults otherwise", async (t) => {
+  for (const [temperature, want5, want6] of [[0.2, 0.2, 0.2], [0, 0.01, 0.01], [-1, 0.01, 0.01], [undefined, 0.7, 0.95]]) {
+    let sent;
+    mockFetch(t, (init) => {
+      sent = gunzipSync(Buffer.from(init.body).subarray(5));
+      return successResponse();
+    });
+    const result = await streamDevin(model, context(), { apiKey: "secret-key", temperature }).result();
+    assert.equal(result.stopReason, "stop", result.errorMessage);
+    const config = field(sent, 8);
+    assert.equal(field(config, 5).readDoubleLE(0), want5);
+    assert.equal(field(config, 6).readDoubleLE(0), want6);
+    assert.equal(Number(field(config, 2)), 64_000);
+    assert.equal(Number(field(config, 3)), 128_000);
+    t.mock.restoreAll();
+  }
+});
 
 test("response hook sees HTTP errors before their body is consumed", async (t) => {
   const response = new Response("rate limited", { status: 429, headers: { "retry-after": "3" } });
@@ -152,6 +170,7 @@ test("invalid hook payloads fail clearly before any network request", async (t) 
     { ...valid, modelUid: " " }, { ...valid, messages: null },
     { ...valid, tools: {} }, { ...valid, maxOutputTokens: 0 },
     { ...valid, maxOutputTokens: 1.5 }, { ...valid, maxOutputTokens: Infinity },
+    { ...valid, temperature: Number.NaN }, { ...valid, temperature: "0.5" },
   ];
   for (const replacement of invalid) {
     const stream = streamDevin(model, context(), {
@@ -184,6 +203,232 @@ test("inference still works without hooks", async (t) => {
   assert.equal(result.stopReason, "stop", result.errorMessage);
   assert.equal(result.content[0].text, "reply");
 });
+
+test("aborting mid-body resolves aborted without an unhandled rejection", async (t) => {
+  const unhandled = [];
+  const onUnhandled = (e) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+  t.after(() => process.off("unhandledRejection", onUnhandled));
+  const controller = new AbortController();
+  // highWaterMark 0: pull runs only once the provider is reading the body, so the abort lands mid-read.
+  mockFetch(t, (init) => new Response(new ReadableStream({
+    start(c) { init.signal.addEventListener("abort", () => c.error(init.signal.reason)); },
+    pull() { controller.abort(new Error("stop")); },
+  }, { highWaterMark: 0 })));
+  const result = await streamDevin(model, context(), { apiKey: "secret-key", signal: controller.signal }).result();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(result.stopReason, "aborted");
+  assert.deepEqual(unhandled, []);
+});
+
+test("normalizeSchema rewrites type arrays as anyOf everywhere without touching data or the input", () => {
+  const input = {
+    type: "object",
+    properties: {
+      n: { type: ["number", "null"], description: "kept" },
+      constrained: { type: ["string", "null"], description: "d", default: null, minLength: 1, enum: ["a", null] },
+      excludesNull: { type: ["string", "null"], enum: ["a"], not: { type: "null" }, if: { minLength: 1 }, then: { maxLength: 3 } },
+      single: { type: ["string", "string"], minLength: 1 },
+      keyed: {
+        type: "object", patternProperties: { "^x": { type: ["string", "null"] } }, propertyNames: { type: ["string", "null"] },
+        dependentSchemas: { k: { type: ["object", "null"] } }, else: { type: ["object", "null"] },
+      },
+      arr: { type: "array", contains: { type: ["string", "null"] } },
+      opts: { type: ["object", "null"], properties: { k: { type: ["integer", "null"] } }, required: ["k"] },
+      empty: { type: [] },
+      tail: { type: "array", items: [true], additionalItems: { type: ["string", "null"] } },
+      uneval: { unevaluatedItems: { type: ["string", "null"] }, unevaluatedProperties: { type: ["string", "null"] } },
+      content: { type: "string", contentSchema: { type: ["string", "null"] } },
+      list: { type: "array", items: { type: ["string", "integer"] } },
+      tuple: { type: "array", items: [{ type: ["string", "null"] }, true] },
+      both: { type: ["string", "null"], anyOf: [{ minLength: 1 }], allOf: [{ maxLength: 9 }] },
+      data: { enum: [{ type: ["x", "y"] }], const: { type: ["a"] }, default: { type: ["b"] } },
+      ref: { $ref: "#/$defs/d" },
+    },
+    additionalProperties: { type: ["boolean", "null"] },
+    $defs: { d: { oneOf: [{ type: ["string", "null"] }] } },
+    definitions: { e: { type: ["integer", "null"] } },
+    dependencies: { n: ["list"], list: { properties: { m: { type: ["number", "null"] } } } },
+    if: { type: ["object", "null"] }, not: { prefixItems: [{ type: ["string", "null"] }] },
+  };
+  const before = structuredClone(input);
+  const out = normalizeSchema(input);
+  assert.deepEqual(input, before);
+  const sn = [{ type: "string" }, { type: "null" }];
+  assert.deepEqual(out.properties.n, { description: "kept", anyOf: [{ type: "number" }, { type: "null" }] });
+  assert.deepEqual(out.properties.constrained, {
+    description: "d", default: null, anyOf: [{ type: "string", minLength: 1, enum: ["a", null] }, { type: "null", enum: ["a", null] }],
+  });
+  const ex = { enum: ["a"], not: { type: "null" }, if: { minLength: 1 }, then: { maxLength: 3 } };
+  assert.deepEqual(out.properties.excludesNull, { anyOf: [{ type: "string", ...ex }, { type: "null", ...ex }] });
+  assert.deepEqual(out.properties.single, { type: "string", minLength: 1 });
+  const on = [{ type: "object" }, { type: "null" }];
+  assert.deepEqual(out.properties.keyed.patternProperties["^x"], { anyOf: sn });
+  assert.deepEqual(out.properties.keyed.propertyNames, { anyOf: sn });
+  assert.deepEqual(out.properties.keyed.dependentSchemas.k, { anyOf: on });
+  assert.deepEqual(out.properties.keyed.else, { anyOf: on });
+  assert.deepEqual(out.properties.arr.contains, { anyOf: sn });
+  assert.deepEqual(out.properties.opts, {
+    anyOf: [{ type: "object", properties: { k: { anyOf: [{ type: "integer" }, { type: "null" }] } }, required: ["k"] }, { type: "null" }],
+  });
+  assert.deepEqual(out.properties.empty, { type: [] });
+  assert.deepEqual(out.properties.tail.additionalItems, { anyOf: sn });
+  assert.deepEqual(out.properties.uneval, { unevaluatedItems: { anyOf: sn }, unevaluatedProperties: { anyOf: sn } });
+  assert.deepEqual(out.properties.content.contentSchema, { anyOf: sn });
+  assert.deepEqual(out.properties.list.items, { anyOf: [{ type: "string" }, { type: "integer" }] });
+  assert.deepEqual(out.properties.tuple.items, [{ anyOf: sn }, true]);
+  assert.deepEqual(out.properties.both, {
+    anyOf: [{ type: "string", allOf: [{ maxLength: 9 }], minLength: 1 }, { type: "null", allOf: [{ maxLength: 9 }] }],
+  });
+  assert.deepEqual(out.properties.data, input.properties.data);
+  assert.deepEqual(out.properties.ref, { $ref: "#/$defs/d" });
+  assert.deepEqual(out.additionalProperties, { anyOf: [{ type: "boolean" }, { type: "null" }] });
+  assert.deepEqual(out.$defs.d.oneOf[0], { anyOf: sn });
+  assert.deepEqual(out.definitions.e, { anyOf: [{ type: "integer" }, { type: "null" }] });
+  assert.deepEqual(out.dependencies.n, ["list"]);
+  assert.deepEqual(out.dependencies.list.properties.m, { anyOf: [{ type: "number" }, { type: "null" }] });
+  assert.deepEqual(out.if, { anyOf: [{ type: "object" }, { type: "null" }] });
+  assert.deepEqual(out.not.prefixItems[0], { anyOf: sn });
+});
+
+test("normalizeSchema leaves schemas with refs into moved nodes unchanged", () => {
+  const holder = { type: ["object", "null"], properties: { id: { type: "string" } } };
+  const moved = { type: "object", properties: { holder, alias: { $ref: "#/properties/holder/properties/id" } } };
+  assert.equal(normalizeSchema(moved), moved);
+  // Identifiers would be duplicated across branches or dropped from the null branch.
+  for (const pinned of [
+    { type: ["string", "number"], $anchor: "a" },
+    { type: ["string", "number"], $dynamicAnchor: "a" },
+    { type: ["object", "string"], properties: { a: { $id: "urn:example:a", type: "integer" } } },
+    { type: "null", anyOf: [{ $defs: { a: { $id: "urn:example:a", const: null } }, $ref: "urn:example:a" }] },
+    { $id: "https://example.com/s.json", type: "object", properties: { holder } },
+  ]) assert.equal(normalizeSchema(pinned), pinned);
+  for (const unsafe of [{ $ref: "#/$defs/x%2Fproperties%2Fid" }, { $ref: "https://example.com/s.json#/properties/holder/properties/id" }, { $ref: "#/$defs/%E0%A4%A" }, { $dynamicRef: "#/$defs/s" }, { $recursiveRef: "#" }]) {
+    const schema = { type: "object", properties: { holder, alias: unsafe } };
+    assert.equal(normalizeSchema(schema), schema);
+  }
+  for (const ref of ["#", "#/$defs/x", "#/definitions/x", "#/$defs/a%20b", "https://example.com/s.json", "https://example.com/s.json#/$defs/x"]) {
+    const stable = { type: "object", properties: { holder, alias: { $ref: ref } } };
+    assert.deepEqual(normalizeSchema(stable).properties.holder.anyOf[1], { type: "null" });
+  }
+});
+
+test("normalizeSchema moves type next to anyOf into the branches", () => {
+  const out = normalizeSchema({
+    type: "string", description: "d", maxLength: 5, anyOf: [{ minLength: 1 }, { pattern: "x", properties: {} }],
+  });
+  assert.deepEqual(out, {
+    description: "d", anyOf: [{ type: "string", maxLength: 5, minLength: 1 }, { type: "string", maxLength: 5, pattern: "x", properties: {} }],
+  });
+  const nullable = normalizeSchema({ type: ["object", "null"], anyOf: [{ required: ["a"] }, { enum: [null] }] });
+  assert.deepEqual(nullable.anyOf, [
+    { type: "object", required: ["a"] }, { type: "object", enum: [null] }, { type: "null" }, { type: "null", enum: [null] },
+  ]);
+  for (const branch of [{ type: "string" }, { anyOf: [{}] }, { maxLength: 3 }, true, { $id: "s" }, { $anchor: "a" }]) {
+    const schema = { type: "string", maxLength: 5, anyOf: [{ minLength: 1 }, branch] };
+    assert.deepEqual(normalizeSchema(schema), schema);
+  }
+  // Each split changes accepted values (Ajv-verified in review), so the node must stay as-is.
+  for (const schema of [
+    { type: "object", additionalProperties: false, anyOf: [{ properties: { b: {} } }] },
+    { type: "object", properties: { a: {} }, anyOf: [{ additionalProperties: false }] },
+    { type: "string", then: { maxLength: 1 }, anyOf: [{ if: { minLength: 1 } }] },
+    { type: ["string", "null"], if: { const: null }, anyOf: [{ then: { not: { const: null } } }] },
+    { type: "array", minContains: 2, anyOf: [{ contains: { const: 1 } }] },
+    { type: "array", items: { type: "string" }, anyOf: [{ prefixItems: [{ type: "number" }] }] },
+    { type: "string", contentMediaType: "application/json", anyOf: [{ contentSchema: { type: "object" } }] },
+    { type: "object", unevaluatedProperties: false, anyOf: [{ properties: { a: {} } }, { properties: { b: {} } }] },
+    { type: "array", unevaluatedItems: false, anyOf: [{ minItems: 1 }] },
+    { type: "object", allOf: [{ properties: { a: true } }], anyOf: [{ unevaluatedProperties: false }] },
+    { type: "array", allOf: [{ prefixItems: [true] }], anyOf: [{ unevaluatedItems: false }] },
+  ]) assert.deepEqual(normalizeSchema(schema), schema);
+  assert.deepEqual(normalizeSchema({ type: "string", anyOf: {} }), { type: "string", anyOf: {} });
+  assert.deepEqual(normalizeSchema({ anyOf: [{ minLength: 1 }] }), { anyOf: [{ minLength: 1 }] });
+});
+
+test("normalizeSchema ignores $ref-shaped data and collapses single types next to anyOf", () => {
+  const data = { $ref: "#/properties/holder" };
+  const out = normalizeSchema({
+    type: "object", default: data, examples: [data],
+    properties: { n: { type: ["number", "null"], enum: [data, 1, null], const: data }, s: { type: ["string"], anyOf: [{ minLength: 1 }] } },
+    dependencies: { n: ["s"] },
+  });
+  assert.equal(out.properties.n.anyOf.length, 2);
+  assert.deepEqual(out.properties.s, { anyOf: [{ type: "string", minLength: 1 }] });
+});
+
+test("sends normalized tool schemas", async (t) => {
+  let sent;
+  mockFetch(t, (init) => { sent = gunzipSync(Buffer.from(init.body).subarray(5)); return successResponse(); });
+  const ctx = normalizeContext({
+    systemPrompt: "s",
+    tools: [{ name: "t", description: "d", parameters: { type: "object", properties: { n: { type: ["number", "null"] } } } }],
+    messages: [{ role: "user", content: "hello", timestamp: 1 }],
+  });
+  const result = await streamDevin(model, ctx, { apiKey: "secret-key" }).result();
+  assert.equal(result.stopReason, "stop", result.errorMessage);
+  assert.deepEqual(JSON.parse(field(field(sent, 10), 3).toString()).properties.n, { anyOf: [{ type: "number" }, { type: "null" }] });
+});
+
+test("onPayload can override temperature, which is sent clamped", async (t) => {
+  let sent;
+  mockFetch(t, (init) => { sent = gunzipSync(Buffer.from(init.body).subarray(5)); return successResponse(); });
+  const result = await streamDevin(model, context(), {
+    apiKey: "secret-key", temperature: 0.9,
+    onPayload(payload) { assert.equal(payload.temperature, 0.9); payload.temperature = 0; },
+  }).result();
+  assert.equal(result.stopReason, "stop", result.errorMessage);
+  assert.equal(field(field(sent, 8), 5).readDoubleLE(), 0.01);
+  assert.equal(field(field(sent, 8), 6).readDoubleLE(), 0.01);
+});
+
+test("errors after the response name the model and request id", async (t) => {
+  for (const [headers, tag] of [[{ "x-request-id": "req-9" }, "[model=test-model, request=req-9]"], [{}, "[model=test-model]"]]) {
+    for (const [status, body, want] of [[500, "boom", "GetChatMessage HTTP 500: boom"], [500, "", "GetChatMessage HTTP 500:"],
+      [200, null, "GetChatMessage returned an empty body"],
+      [200, Buffer.alloc(0), "Devin stream ended without an EOS trailer"]]) {
+      mockFetch(t, () => new Response(body, { status, headers }));
+      assert.equal((await streamDevin(model, context(), { apiKey: "secret-key" }).result()).errorMessage, `${want} ${tag}`);
+      t.mock.restoreAll();
+    }
+  }
+});
+
+test("trailer errors name the model and request id", async (t) => {
+  const trailer = (json) => { const b = Buffer.from(JSON.stringify(json)); const h = Buffer.alloc(5); h[0] = 2; h.writeUInt32BE(b.length, 1); return Buffer.concat([h, b]); };
+  for (const [headers, suffix] of [[{ "x-request-id": "req-9" }, "[model=test-model, request=req-9]"], [{}, "[model=test-model]"]]) {
+    mockFetch(t, () => new Response(trailer({ error: { code: "internal", message: "an internal error occurred" } }), { headers }));
+    const result = await streamDevin(model, context(), { apiKey: "secret-key" }).result();
+    assert.equal(result.stopReason, "error");
+    assert.equal(result.errorMessage, `an internal error occurred ${suffix}`);
+    t.mock.restoreAll();
+  }
+});
+
+for (const [finish, want] of [[undefined, "toolUse"], [0, "toolUse"], [10, "toolUse"], [3, "length"], [11, "error"]]) {
+  test(`tool calls with finish ${finish} end as ${want}`, async (t) => {
+    const call = encodeMessage(6, Buffer.concat([encodeString(1, "call-1"), encodeString(2, "lookup"), encodeString(3, "{}")]));
+    const frames = [frameConnectStream(call)];
+    if (finish !== undefined) frames.push(frameConnectStream(encodeVarintField(5, finish)));
+    mockFetch(t, () => new Response(Buffer.concat([...frames, eos])));
+    const result = await streamDevin(model, context(), { apiKey: "secret-key" }).result();
+    assert.equal(result.stopReason, want, result.errorMessage);
+    assert.equal(result.content.find((block) => block.type === "toolCall")?.name, "lookup");
+  });
+}
+
+for (const [finish, want] of [[0, "stop"], [11, "error"]]) {
+  test(`text-only replies with finish ${finish} end as ${want}`, async (t) => {
+    mockFetch(t, () => new Response(Buffer.concat([frameConnectStream(Buffer.concat([encodeString(3, "hi"), encodeVarintField(5, finish)])), eos])));
+    const stream = streamDevin(model, context(), { apiKey: "secret-key" });
+    const events = [];
+    for await (const event of stream) events.push(event.type);
+    const result = await stream.result();
+    assert.equal(result.stopReason, want);
+    assert.ok(events.indexOf("text_end") >= 0 && events.indexOf("text_end") < events.length - 1);
+    if (want === "error") assert.equal(result.errorMessage, "Provider finish_reason: content_filter [model=test-model]");
+  });
+}
 
 for (const placement of ["before", "after", "interrupted"]) {
   test(`system update with ${placement} tool results preserves encoded prefixes across turns`, async (t) => {

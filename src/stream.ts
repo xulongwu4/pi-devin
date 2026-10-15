@@ -118,25 +118,133 @@ function encodeChatMessagePrompt(
   return Buffer.concat(parts);
 }
 
-function encodeCompletionConfiguration(maxOutputTokens?: number): Buffer {
+// Field names from oh-my-pi's reverse-engineered omp-llm-devin wire.rs: 1 num_completions, 2 max_tokens,
+// 3 max_newlines, 5 temperature, 6 first_temperature, 7 top_k, 8 top_p, 11 fim_eot_prob_threshold.
+// Live 2026-10-15 (this field layout): the server ignored max_tokens; temperature reached GLM but not GPT/Claude/SWE-2.
+function encodeCompletionConfiguration(maxOutputTokens?: number, temperature?: number): Buffer {
+  // Devin rejects temperature 0 (also the proto3 default) with "an internal error occurred".
+  if (temperature !== undefined) temperature = Math.max(temperature, 0.01);
   return Buffer.concat([
     encodeVarintField(1, 1),
-    encodeVarintField(2, 64_000),
-    encodeVarintField(3, maxOutputTokens ?? 128_000),
-    encodeFixed64Field(5, 0.7),
-    encodeFixed64Field(6, 0.95),
+    encodeVarintField(2, maxOutputTokens ?? 64_000),
+    encodeVarintField(3, 128_000),
+    encodeFixed64Field(5, temperature ?? 0.7),
+    encodeFixed64Field(6, temperature ?? 0.95),
     encodeVarintField(7, 50),
     encodeFixed64Field(8, 1.0),
     encodeFixed64Field(11, 1.0),
   ]);
 }
 
+const SUBSCHEMA_MAPS = ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"];
+const SUBSCHEMAS = [
+  "additionalProperties", "additionalItems", "unevaluatedProperties", "unevaluatedItems", "items", "contains",
+  "propertyNames", "contentSchema", "if", "then", "else", "not",
+];
+// Annotations stay on the rewritten node; every other keyword moves into the anyOf branches.
+const ANNOTATIONS = new Set([
+  "title", "description", "default", "examples", "$comment", "deprecated", "readOnly", "writeOnly",
+  "$schema", "$defs", "definitions",
+]);
+const SUBSCHEMA_LISTS = ["prefixItems", "anyOf", "oneOf", "allOf"];
+// Keywords read with a same-object sibling; merging a node keyword with a branch keyword from one group
+// would pair them where the input kept them apart (e.g. additionalProperties seeing branch properties).
+const LINKED = [
+  ["properties", "patternProperties", "additionalProperties"],
+  ["prefixItems", "items", "additionalItems", "contains", "minContains", "maxContains"],
+  ["if", "then", "else"],
+  ["contentMediaType", "contentEncoding", "contentSchema"],
+];
+// Branch keys that block merging: unevaluated* would start seeing the node's applicators (allOf, $ref, ...).
+const UNMERGEABLE = ["type", "anyOf", "unevaluatedProperties", "unevaluatedItems"];
+// Dynamic refs and resource identifiers would be dropped from the null branch or duplicated across branches.
+const PINNED = ["$dynamicRef", "$recursiveRef", "$id", "$anchor", "$dynamicAnchor"];
+// Keywords that can reject null; the null branch keeps only these (Gemini rejects e.g. properties there).
+const ANY_TYPE = ["enum", "const", "not", "allOf", "oneOf", "if", "then", "else", "$ref"];
+// Local refs other than "#", "#/$defs/x", "#/definitions/x" may point into nodes the rewrite moves.
+const STABLE_REF = /^#(\/(\$defs|definitions)\/[^/]+)?$/;
+
+// Fragments are URI-encoded: "#/$defs/x%2Fy" points at "#/$defs/x/y", inside a node that may move.
+function isStableRef(ref: string): boolean {
+  try {
+    return STABLE_REF.test(decodeURIComponent(ref));
+  } catch {
+    return false;
+  }
+}
+
+// Walks schema positions only, so "$ref" inside data (enum, const, default, examples) is not a reference.
+function mustSendUnchanged(schema: unknown): boolean {
+  if (Array.isArray(schema)) return schema.some(mustSendUnchanged);
+  if (!schema || typeof schema !== "object") return false;
+  const node = schema as Record<string, unknown>;
+  // Check the fragment of absolute refs too: "<root $id>#/properties/x" points into this document.
+  const hash = typeof node.$ref === "string" ? node.$ref.indexOf("#") : -1;
+  if (hash >= 0 && !isStableRef((node.$ref as string).slice(hash))) return true;
+  if (PINNED.some((key) => key in node)) return true;
+  const maps = SUBSCHEMA_MAPS.map((key) => node[key]).filter((map) => map && typeof map === "object" && !Array.isArray(map));
+  return maps.some((map) => Object.values(map as object).some(mustSendUnchanged)) ||
+    [...SUBSCHEMAS, ...SUBSCHEMA_LISTS].some((key) => mustSendUnchanged(node[key]));
+}
+
+/**
+ * Devin-hosted Gemini rejects JSON Schema type arrays (e.g. ["number","null"]) and anyOf with type or
+ * type-specific siblings (minLength, properties, enum, ...), so rewrite to anyOf branches that carry them.
+ */
+export function normalizeSchema(schema: unknown): unknown {
+  // shortcut: schemas with pointer refs into moved nodes or PINNED keywords are sent unchanged; upgrade by
+  // rewriting the refs / identifiers if such tool schemas show up.
+  return mustSendUnchanged(schema) ? schema : normalizeNode(schema);
+}
+
+// The result shares nested values across branches and with the input; treat it as read-only.
+function normalizeNode(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(normalizeNode);
+  if (!schema || typeof schema !== "object") return schema;
+  const out: Record<string, unknown> = { ...(schema as Record<string, unknown>) };
+  for (const key of SUBSCHEMA_MAPS) {
+    const map = out[key];
+    if (map && typeof map === "object" && !Array.isArray(map)) {
+      // dependencies may hold string arrays (property dependencies); normalizeSchema leaves those intact.
+      out[key] = Object.fromEntries(Object.entries(map).map(([k, v]) => [k, normalizeNode(v)]));
+    }
+  }
+  for (const key of SUBSCHEMAS) if (key in out) out[key] = normalizeNode(out[key]);
+  for (const key of SUBSCHEMA_LISTS) if (Array.isArray(out[key])) out[key] = normalizeNode(out[key]);
+  const types = Array.isArray(out.type) ? [...new Set(out.type as unknown[])] : "type" in out ? [out.type] : [];
+  const branches = "anyOf" in out ? out.anyOf : [{}];
+  if (types.length === 0 || !Array.isArray(branches)) return out;
+  if (types.length === 1 && !("anyOf" in out)) return { ...out, type: types[0] };
+  const root: Record<string, unknown> = {};
+  const constraints: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(out)) {
+    if (key !== "type" && key !== "anyOf") (ANNOTATIONS.has(key) ? root : constraints)[key] = value;
+  }
+  // Gemini rejects type next to anyOf (even one type) and allOf:[{anyOf}], but accepts type in each branch.
+  // shortcut: branches with an UNMERGEABLE key, a keyword also on the node, or a LINKED keyword split from
+  // the node are not intersected and the node is sent as-is; upgrade if such schemas show up.
+  // unevaluated* on the node sees all passing branches at once, so it blocks splitting.
+  const linked = (branch: object): boolean =>
+    LINKED.some((group) => group.some((key) => key in branch) && group.some((key) => key in constraints));
+  const mergeable = (branch: unknown): boolean =>
+    !!branch && typeof branch === "object" && !Array.isArray(branch) && !linked(branch) &&
+    Object.keys(branch).every((key) => !UNMERGEABLE.includes(key) && !(key in constraints));
+  if ("anyOf" in out && ("unevaluatedProperties" in constraints || "unevaluatedItems" in constraints)) return out;
+  if (!branches.every(mergeable)) return out;
+  root.anyOf = types.flatMap((type) => branches.map((branch) => {
+    const merged = Object.entries({ ...constraints, ...(branch as object) });
+    return { type, ...Object.fromEntries(type === "null" ? merged.filter(([key]) => ANY_TYPE.includes(key)) : merged) };
+  }));
+  return root;
+}
+
 function encodeToolDef(tool: ToolDef): Buffer {
+  // shortcut: 6998-UTF-16-unit cap inherited from upstream, rationale unverified; revisit if the server limit is found.
   const description = tool.description.length > 6_998 ? `${tool.description.slice(0, 6_995)}...` : tool.description;
   return Buffer.concat([
     encodeString(1, tool.name),
     encodeString(2, description),
-    encodeString(3, JSON.stringify(tool.parameters ?? {})),
+    encodeString(3, JSON.stringify(normalizeSchema(tool.parameters ?? {}))),
   ]);
 }
 
@@ -152,6 +260,7 @@ function buildGetChatMessageRequest(args: {
   requestId: bigint;
   triggerId: string;
   maxOutputTokens?: number;
+  temperature?: number;
 }): Buffer {
   const metadata = buildMetadata({
     apiKey: args.apiKey,
@@ -173,7 +282,7 @@ function buildGetChatMessageRequest(args: {
     encodeMessage(1, metadata),
     ...prompts,
     encodeVarintField(7, 5),
-    encodeMessage(8, encodeCompletionConfiguration(args.maxOutputTokens)),
+    encodeMessage(8, encodeCompletionConfiguration(args.maxOutputTokens, args.temperature)),
     ...(args.tools ?? []).map((tool) => encodeMessage(10, encodeToolDef(tool))),
     encodeString(16, args.cascadeId),
     encodeString(21, args.modelUid),
@@ -274,6 +383,7 @@ async function* streamChatEvents(args: {
   messages: ChatHistoryItem[];
   tools?: ToolDef[];
   maxOutputTokens?: number;
+  temperature?: number;
   signal?: AbortSignal;
 }, model: Model<Api>, options?: SimpleStreamOptions): AsyncGenerator<CloudChatEvent | { kind: "start" }> {
   // Keep credentials and transport metadata out of the inspectable payload.
@@ -282,6 +392,7 @@ async function* streamChatEvents(args: {
     messages: args.messages,
     tools: args.tools,
     maxOutputTokens: args.maxOutputTokens,
+    temperature: args.temperature,
   };
   const replacement = await options?.onPayload?.(payload, model);
   args.signal?.throwIfAborted();
@@ -292,10 +403,11 @@ async function* streamChatEvents(args: {
     !Array.isArray(payload.messages) ||
     (payload.tools !== undefined && !Array.isArray(payload.tools)) ||
     (payload.maxOutputTokens !== undefined &&
-      (!Number.isSafeInteger(payload.maxOutputTokens) || payload.maxOutputTokens <= 0))
+      (!Number.isSafeInteger(payload.maxOutputTokens) || payload.maxOutputTokens <= 0)) ||
+    (payload.temperature !== undefined && !Number.isFinite(payload.temperature))
   ) {
     throw new Error("Invalid Devin payload: expected a non-empty modelUid string, messages array, " +
-      "optional tools array, and optional positive safe-integer maxOutputTokens");
+      "optional tools array, optional positive safe-integer maxOutputTokens, and optional finite temperature");
   }
 
   const host = args.host.replace(/\/$/, "");
@@ -313,6 +425,7 @@ async function* streamChatEvents(args: {
     requestId: BigInt(Date.now()),
     triggerId: randomUUID(),
     maxOutputTokens: payload.maxOutputTokens,
+    temperature: payload.temperature,
   });
 
   const resp = await fetch(`${host}/exa.api_server_pb.ApiServerService/GetChatMessage`, {
@@ -334,16 +447,20 @@ async function* streamChatEvents(args: {
     await resp.body?.cancel().catch(() => {});
     throw error;
   }
+  const requestId = resp.headers.get("x-request-id");
+  const tag = `[model=${payload.modelUid}${requestId ? `, request=${requestId}` : ""}]`;
   if (!resp.ok) {
-    throw new Error(`GetChatMessage HTTP ${resp.status}: ${(await resp.text()).slice(0, 300)}`);
+    const body = (await resp.text()).slice(0, 300);
+    throw new Error(`GetChatMessage HTTP ${resp.status}:${body ? ` ${body}` : ""} ${tag}`);
   }
-  if (!resp.body) throw new Error("GetChatMessage returned an empty body");
+  if (!resp.body) throw new Error(`GetChatMessage returned an empty body ${tag}`);
 
   yield { kind: "start" };
   const reader = resp.body.getReader();
   const queue: Buffer[] = [];
   let queued = 0;
   let sawEos = false;
+  let filtered = false;
   let trailerError: string | null = null;
 
   const peek = (n: number): Buffer | null => {
@@ -411,7 +528,10 @@ async function* streamChatEvents(args: {
           }
           continue;
         }
-        yield* decodeChatFrame(payload);
+        for (const event of decodeChatFrame(payload)) {
+          if (event.kind === "finish" && event.reason === "content_filter") filtered = true;
+          yield event;
+        }
       }
     }
   } finally {
@@ -420,15 +540,14 @@ async function* streamChatEvents(args: {
     } catch {
       // ignore
     }
-    try {
-      void resp.body?.cancel();
-    } catch {
-      // ignore
-    }
+    // cancel() rejects (async) when the body already errored, e.g. on abort.
+    resp.body.cancel().catch(() => {});
   }
+  // Same message as pi-ai's OpenAI adapter, plus the tag; streamDevin closes open blocks first.
+  if (filtered) throw new Error(`Provider finish_reason: content_filter ${tag}`);
 
-  if (trailerError) throw new Error(trailerError);
-  if (!sawEos) throw new Error("Devin stream ended without an EOS trailer");
+  if (trailerError) throw new Error(`${trailerError} ${tag}`);
+  if (!sawEos) throw new Error(`Devin stream ended without an EOS trailer ${tag}`);
 }
 
 export function streamDevin(
@@ -515,6 +634,7 @@ export function streamDevin(
         messages: mapped.messages,
         tools: mapped.tools.length > 0 ? mapped.tools : undefined,
         maxOutputTokens: options?.maxTokens,
+        temperature: options?.temperature,
         signal: options?.signal,
       }, model, options)) {
         if (event.kind === "start") {
@@ -571,6 +691,8 @@ export function streamDevin(
           closeText();
           closeThinking();
           closeTool();
+          // streamChatEvents throws next, so a cut-off tool call never runs with {} args.
+          if (event.reason === "content_filter") continue;
           output.stopReason =
             event.reason === "tool_calls" ? "toolUse" : event.reason === "length" ? "length" : "stop";
         } else if (event.kind === "usage") {
@@ -586,6 +708,10 @@ export function streamDevin(
       closeText();
       closeThinking();
       closeTool();
+      // Gemini finishes tool-call replies as plain "stop"; report toolUse like the other models do.
+      if (output.stopReason !== "length" && output.content.some((block) => block.type === "toolCall")) {
+        output.stopReason = "toolUse";
+      }
       stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
       stream.end();
     } catch (error) {
